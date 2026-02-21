@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import os
 import shutil
 import tempfile
@@ -138,7 +139,7 @@ class TransactionsHandler(FileSystemEventHandler):
                 self._last_uploaded_day = day_value
                 self._last_uploaded_mtime = file_mtime
             finally:
-                tmp_file.unlink(missing_ok=True)
+                self._safe_unlink(tmp_file)
         except Exception as exc:
             print(f"[ERROR] transactions.csv işleme hatası: {exc}")
 
@@ -164,9 +165,38 @@ class TransactionsHandler(FileSystemEventHandler):
 
     @staticmethod
     def _prepare_named_copy(source_file: Path, target_name: str) -> Path:
-        target_path = Path(tempfile.gettempdir()) / target_name
-        shutil.copy2(source_file, target_path)
+        prefix = Path(target_name).stem + "_"
+        suffix = Path(target_name).suffix or ".csv"
+        with tempfile.NamedTemporaryFile(prefix=prefix, suffix=suffix, delete=False) as tmp:
+            target_path = Path(tmp.name)
+
+        for attempt in range(1, 6):
+            try:
+                shutil.copy2(source_file, target_path)
+                return target_path
+            except PermissionError as exc:
+                if attempt == 5:
+                    raise
+                if getattr(exc, "winerror", None) != 32 and exc.errno != errno.EACCES:
+                    raise
+                time.sleep(0.4 * attempt)
+
         return target_path
+
+    @staticmethod
+    def _safe_unlink(file_path: Path) -> None:
+        for attempt in range(1, 6):
+            try:
+                file_path.unlink(missing_ok=True)
+                return
+            except PermissionError as exc:
+                if attempt == 5:
+                    print(f"[WARN] Geçici dosya silinemedi: {file_path} ({exc})")
+                    return
+                if getattr(exc, "winerror", None) != 32 and exc.errno != errno.EACCES:
+                    print(f"[WARN] Geçici dosya silinirken beklenmeyen hata: {file_path} ({exc})")
+                    return
+                time.sleep(0.4 * attempt)
 
 
 def is_game_running(process_names: tuple[str, ...]) -> bool:
