@@ -1,5 +1,11 @@
 """Big Ambitions transactions.csv izleme + Google Drive senkronizasyon scripti.
 
+Yeni davranış:
+- Drive üzerinde `big ambitions` adlı kök klasörü garanti edilir.
+- Gün değerine göre 60 günlük dönem klasörleri (1-60, 61-120, ...) oluşturulur.
+- transactions.csv değiştiğinde ilgili dönem klasörüne transactionsgun_<gun>.csv yüklenir.
+- Her dönem klasöründe `main.xlsx` üretilir (Excel SUMIF formülleri ile tip bazlı toplam).
+- Kök klasörde `main_total.xlsx` üretilir (tüm dönemlerin toplamı, yine Excel formülleri).
 Bu script şunları yapar:
 1) Big Ambitions süreci açık mı kontrol eder.
 2) SaveGames altında en güncel sürüm + en güncel save klasörünü dinamik bulur.
