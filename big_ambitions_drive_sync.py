@@ -1,11 +1,20 @@
 """Big Ambitions transactions.csv izleme + Google Drive senkronizasyon scripti.
 
-Yeni davranış:
-- Drive üzerinde `big ambitions` adlı kök klasörü garanti edilir.
-- Gün değerine göre 60 günlük dönem klasörleri (1-60, 61-120, ...) oluşturulur.
-- transactions.csv değiştiğinde ilgili dönem klasörüne transactionsgun_<gun>.csv yüklenir.
-- Her dönem klasöründe `main.xlsx` üretilir (Excel SUMIF formülleri ile tip bazlı toplam).
-- Kök klasörde `main_total.xlsx` üretilir (tüm dönemlerin toplamı, yine Excel formülleri).
+Bu script şunları yapar:
+1) Big Ambitions süreci açık mı kontrol eder.
+2) SaveGames altında en güncel sürüm + en güncel save klasörünü dinamik bulur.
+3) transactions.csv değişince dosya yazımı bitsin diye kısa bekler.
+4) CSV'den ilk veri satırının B sütunundaki (index=1) gün bilgisini okur.
+5) Dosyayı transactionsgun_<gun>.csv adıyla Google Drive'a create/update eder.
+
+Önemli:
+- Service Account JSON dosyası varsayılan olarak script ile aynı klasörde
+  service_account_credentials.json adıyla beklenir.
+
+Opsiyonel environment variable'lar:
+- SERVICE_ACCOUNT_FILE
+- GDRIVE_FOLDER_ID
+- GAME_PROCESS_NAMES (varsayılan: BigAmbitions.exe,UnityPlayer.exe)
 """
 
 from __future__ import annotations
@@ -13,313 +22,145 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import re
 import shutil
 import tempfile
 import time
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import filedialog, messagebox
 from typing import Optional
+from tkinter import filedialog, messagebox
 
 import psutil
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-from openpyxl import Workbook
+from googleapiclient.http import MediaFileUpload
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
-FOLDER_MIME = "application/vnd.google-apps.folder"
-ROOT_FOLDER_NAME = "big ambitions"
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 
 @dataclass
 class Config:
     savegames_root: Path
     service_account_file: Path
+    drive_folder_id: Optional[str]
     process_names: tuple[str, ...]
     poll_seconds: int = 15
     file_settle_seconds: int = 10
 
 
-class DriveClient:
-    """Drive üzerinde klasör/dosya yönetimi ve upload/download yardımcıları."""
+class DriveUploader:
+    """Service Account ile Drive create/update."""
 
-    def __init__(self, service_account_file: Path) -> None:
+    def __init__(self, service_account_file: Path, folder_id: Optional[str] = None) -> None:
+        self.folder_id = folder_id
         credentials = service_account.Credentials.from_service_account_file(
             str(service_account_file), scopes=SCOPES
         )
         self.service = build("drive", "v3", credentials=credentials, cache_discovery=False)
 
-    @staticmethod
-    def _escape(name: str) -> str:
-        return name.replace("'", "\\'")
+    def _find_existing_file_id(self, file_name: str) -> Optional[str]:
+        safe_name = file_name.replace("'", "\\'")
+        query_parts = [f"name = '{safe_name}'", "trashed = false"]
+        if self.folder_id:
+            query_parts.append(f"'{self.folder_id}' in parents")
+        query = " and ".join(query_parts)
 
-    def _find_folder(self, name: str, parent_id: Optional[str]) -> Optional[str]:
-        query = [
-            f"name = '{self._escape(name)}'",
-            f"mimeType = '{FOLDER_MIME}'",
-            "trashed = false",
-        ]
-        if parent_id:
-            query.append(f"'{parent_id}' in parents")
         response = (
             self.service.files()
-            .list(q=" and ".join(query), fields="files(id,name)", pageSize=1)
+            .list(q=query, spaces="drive", fields="files(id, name)", pageSize=1)
             .execute()
         )
         files = response.get("files", [])
         return files[0]["id"] if files else None
 
-    def ensure_folder(self, name: str, parent_id: Optional[str]) -> str:
-        existing = self._find_folder(name, parent_id)
-        if existing:
-            return existing
-        body = {"name": name, "mimeType": FOLDER_MIME}
-        if parent_id:
-            body["parents"] = [parent_id]
-        created = self.service.files().create(body=body, fields="id").execute()
-        return created["id"]
+    def upload_or_update(self, local_file: Path, drive_name: str) -> str:
+        media = MediaFileUpload(str(local_file), mimetype="text/csv", resumable=False)
+        existing_id = self._find_existing_file_id(drive_name)
 
-    def upload_or_update_file(
-        self,
-        local_file: Path,
-        drive_name: str,
-        parent_id: str,
-        mimetype: str,
-    ) -> str:
-        file_id = self._find_file_id(drive_name, parent_id)
-        media = MediaFileUpload(str(local_file), mimetype=mimetype, resumable=False)
-        if file_id:
-            self.service.files().update(fileId=file_id, media_body=media).execute()
-            return f"Updated: {drive_name}"
+        if existing_id:
+            self.service.files().update(fileId=existing_id, media_body=media).execute()
+            return f"Updated: {drive_name} (id={existing_id})"
 
-        body = {"name": drive_name, "parents": [parent_id]}
-        self.service.files().create(body=body, media_body=media, fields="id").execute()
-        return f"Created: {drive_name}"
+        metadata = {"name": drive_name}
+        if self.folder_id:
+            metadata["parents"] = [self.folder_id]
 
-    def _find_file_id(self, name: str, parent_id: str) -> Optional[str]:
-        query = [
-            f"name = '{self._escape(name)}'",
-            "trashed = false",
-            f"'{parent_id}' in parents",
-        ]
-        response = (
-            self.service.files()
-            .list(q=" and ".join(query), fields="files(id,name)", pageSize=1)
-            .execute()
-        )
-        files = response.get("files", [])
-        return files[0]["id"] if files else None
-
-    def list_files(self, parent_id: str, mime_exclude_folder: bool = False) -> list[dict]:
-        query = ["trashed = false", f"'{parent_id}' in parents"]
-        if mime_exclude_folder:
-            query.append(f"mimeType != '{FOLDER_MIME}'")
-        response = (
-            self.service.files()
-            .list(q=" and ".join(query), fields="files(id,name,mimeType)", pageSize=1000)
-            .execute()
-        )
-        return response.get("files", [])
-
-    def list_folders(self, parent_id: str) -> list[dict]:
-        query = [
-            "trashed = false",
-            f"'{parent_id}' in parents",
-            f"mimeType = '{FOLDER_MIME}'",
-        ]
-        response = (
-            self.service.files()
-            .list(q=" and ".join(query), fields="files(id,name)", pageSize=1000)
-            .execute()
-        )
-        return response.get("files", [])
-
-    def download_file(self, file_id: str, target_path: Path) -> None:
-        request = self.service.files().get_media(fileId=file_id)
-        with target_path.open("wb") as fh:
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-
-
-class ExcelAggregator:
-    """Toplamları Excel formülleriyle oluşturan rapor üretici."""
-
-    TYPE_COL_IDX = 2  # C sütunu
-    VALUE_COL_IDX = 3  # D sütunu
-
-    @classmethod
-    def create_main_workbook(cls, csv_files: list[Path], output_path: Path, sheet_name: str) -> None:
-        wb = Workbook()
-        ws_data = wb.active
-        ws_data.title = "Transactions"
-        ws_data.append(["A", "B", "Type(C)", "Value(D)"])
-
-        types: set[str] = set()
-        for csv_path in csv_files:
-            with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
-                reader = csv.reader(f)
-                first = next(reader, None)
-                if first is None:
-                    continue
-
-                # Başlık satırı olabilir.
-                rows = reader if not (len(first) > 3 and cls._is_number(first[1])) else [first, *reader]
-                for row in rows:
-                    if len(row) <= cls.VALUE_COL_IDX:
-                        continue
-                    ws_data.append([
-                        row[0] if len(row) > 0 else "",
-                        row[1] if len(row) > 1 else "",
-                        row[2] if len(row) > 2 else "",
-                        cls._to_float_or_raw(row[3]),
-                    ])
-                    t = (row[2] if len(row) > 2 else "").strip()
-                    if t:
-                        types.add(t)
-
-        ws_main = wb.create_sheet(sheet_name)
-        ws_main.append(["Type", "Total"])
-
-        sorted_types = sorted(types)
-        for idx, expense_type in enumerate(sorted_types, start=2):
-            ws_main.cell(row=idx, column=1, value=expense_type)
-            ws_main.cell(
-                row=idx,
-                column=2,
-                value=f"=SUMIF(Transactions!$C:$C,A{idx},Transactions!$D:$D)",
-            )
-
-        total_row = len(sorted_types) + 2
-        ws_main.cell(row=total_row, column=1, value="GRAND_TOTAL")
-        ws_main.cell(row=total_row, column=2, value=f"=SUM(B2:B{max(total_row - 1, 2)})")
-
-        wb.save(output_path)
-
-    @staticmethod
-    def _is_number(value: str) -> bool:
-        try:
-            float(value.strip())
-            return True
-        except Exception:
-            return False
-
-    @staticmethod
-    def _to_float_or_raw(value: str):
-        raw = value.strip()
-        try:
-            return float(raw)
-        except Exception:
-            return raw
+        created = self.service.files().create(body=metadata, media_body=media, fields="id").execute()
+        return f"Created: {drive_name} (id={created.get('id')})"
 
 
 class TransactionsHandler(FileSystemEventHandler):
-    def __init__(self, drive: DriveClient, settle_seconds: int = 10) -> None:
-        self.drive = drive
+    """Sadece transactions.csv modified event'ini işler."""
+
+    def __init__(self, uploader: DriveUploader, settle_seconds: int = 10) -> None:
+        self.uploader = uploader
         self.settle_seconds = settle_seconds
+        self._last_uploaded_day: Optional[str] = None
         self._last_uploaded_mtime: Optional[float] = None
 
     def on_modified(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
+
         changed_file = Path(event.src_path)
         if changed_file.name.lower() != "transactions.csv":
             return
 
         try:
-            print(f"[WATCHDOG] Değişim: {changed_file}")
+            print(f"[WATCHDOG] Değişim algılandı: {changed_file}")
             time.sleep(self.settle_seconds)
+
+            # Aynı mtime için duplicate event'leri atla.
             file_mtime = changed_file.stat().st_mtime
-            if self._last_uploaded_mtime == file_mtime:
-                return
-
-            day_value = extract_day_from_csv(changed_file)
+            day_value = self._extract_day_from_csv(changed_file)
             if day_value is None:
-                print("[WARN] Gün bilgisi okunamadı.")
+                print("[WARN] B sütunu (gün) okunamadı, upload atlandı.")
                 return
 
-            self._sync_transaction(changed_file, day_value)
-            self._last_uploaded_mtime = file_mtime
+            if self._last_uploaded_day == day_value and self._last_uploaded_mtime == file_mtime:
+                print("[INFO] Duplicate event atlandı.")
+                return
+
+            drive_name = f"transactionsgun_{day_value}.csv"
+            tmp_file = self._prepare_named_copy(changed_file, drive_name)
+            try:
+                result = self.uploader.upload_or_update(tmp_file, drive_name)
+                print(f"[DRIVE] {result}")
+                self._last_uploaded_day = day_value
+                self._last_uploaded_mtime = file_mtime
+            finally:
+                tmp_file.unlink(missing_ok=True)
         except Exception as exc:
-            print(f"[ERROR] Event işleme hatası: {exc}")
+            print(f"[ERROR] transactions.csv işleme hatası: {exc}")
 
-    def _sync_transaction(self, source_csv: Path, day_value: int) -> None:
-        root_id = self.drive.ensure_folder(ROOT_FOLDER_NAME, None)
-        period_label = day_to_period_label(day_value)
-        period_folder_id = self.drive.ensure_folder(period_label, root_id)
+    @staticmethod
+    def _extract_day_from_csv(csv_file: Path) -> Optional[str]:
+        with csv_file.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.reader(f)
+            first_row = next(reader, None)
+            if not first_row:
+                return None
 
-        drive_csv_name = f"transactionsgun_{day_value}.csv"
-        tmp_csv = Path(tempfile.gettempdir()) / drive_csv_name
-        shutil.copy2(source_csv, tmp_csv)
-        try:
-            print("[DRIVE]", self.drive.upload_or_update_file(tmp_csv, drive_csv_name, period_folder_id, "text/csv"))
-        finally:
-            tmp_csv.unlink(missing_ok=True)
+            # Başlık yoksa ilk satırdan oku
+            if len(first_row) > 1 and first_row[1].strip().isdigit():
+                return first_row[1].strip()
 
-        self._rebuild_period_main(period_folder_id)
-        self._rebuild_global_main(root_id)
+            # Başlık varsa ilk veri satırından oku
+            data_row = next(reader, None)
+            if data_row and len(data_row) > 1:
+                value = data_row[1].strip()
+                return value or None
 
-    def _rebuild_period_main(self, period_folder_id: str) -> None:
-        csv_files = download_csv_files_from_folder(self.drive, period_folder_id)
-        output = Path(tempfile.gettempdir()) / "main.xlsx"
-        ExcelAggregator.create_main_workbook(csv_files, output, "main")
-        print("[DRIVE]", self.drive.upload_or_update_file(output, "main.xlsx", period_folder_id, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
-        cleanup_paths(csv_files + [output])
+        return None
 
-    def _rebuild_global_main(self, root_id: str) -> None:
-        all_csvs: list[Path] = []
-        for folder in self.drive.list_folders(root_id):
-            if re.fullmatch(r"\d+-\d+", folder["name"]):
-                all_csvs.extend(download_csv_files_from_folder(self.drive, folder["id"]))
-
-        output = Path(tempfile.gettempdir()) / "main_total.xlsx"
-        ExcelAggregator.create_main_workbook(all_csvs, output, "main_total")
-        print("[DRIVE]", self.drive.upload_or_update_file(output, "main_total.xlsx", root_id, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
-        cleanup_paths(all_csvs + [output])
-
-
-def cleanup_paths(paths: list[Path]) -> None:
-    for p in paths:
-        p.unlink(missing_ok=True)
-
-
-def download_csv_files_from_folder(drive: DriveClient, folder_id: str) -> list[Path]:
-    files = drive.list_files(folder_id, mime_exclude_folder=True)
-    csv_candidates = [f for f in files if f["name"].lower().endswith(".csv")]
-    local_paths: list[Path] = []
-    for item in csv_candidates:
-        target = Path(tempfile.gettempdir()) / f"{item['id']}_{item['name']}"
-        drive.download_file(item["id"], target)
-        local_paths.append(target)
-    return local_paths
-
-
-def day_to_period_label(day_value: int) -> str:
-    start = ((day_value - 1) // 60) * 60 + 1
-    end = start + 59
-    return f"{start}-{end}"
-
-
-def extract_day_from_csv(csv_file: Path) -> Optional[int]:
-    with csv_file.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f)
-        first_row = next(reader, None)
-        if not first_row:
-            return None
-
-        if len(first_row) > 1 and first_row[1].strip().isdigit():
-            return int(first_row[1].strip())
-
-        data_row = next(reader, None)
-        if data_row and len(data_row) > 1 and data_row[1].strip().isdigit():
-            return int(data_row[1].strip())
-    return None
+    @staticmethod
+    def _prepare_named_copy(source_file: Path, target_name: str) -> Path:
+        target_path = Path(tempfile.gettempdir()) / target_name
+        shutil.copy2(source_file, target_path)
+        return target_path
 
 
 def is_game_running(process_names: tuple[str, ...]) -> bool:
@@ -334,19 +175,24 @@ def is_game_running(process_names: tuple[str, ...]) -> bool:
 def find_latest_save_folder(savegames_root: Path) -> Optional[Path]:
     if not savegames_root.exists():
         return None
+
     version_dirs = [p for p in savegames_root.iterdir() if p.is_dir()]
     if not version_dirs:
         return None
+
     latest_version = max(version_dirs, key=lambda p: p.stat().st_mtime)
     save_dirs = [p for p in latest_version.iterdir() if p.is_dir()]
     if not save_dirs:
         return None
+
     return max(save_dirs, key=lambda p: p.stat().st_mtime)
 
 
 def build_default_config() -> Config:
+    # Gereksinimde belirtildiği gibi home çözümleme.
     user_profile = os.environ.get("USERPROFILE")
     user_home = Path(user_profile) if user_profile else Path(os.path.expanduser("~"))
+
     savegames_root = (
         user_home
         / "AppData"
@@ -355,16 +201,19 @@ def build_default_config() -> Config:
         / "Big Ambitions"
         / "SaveGames"
     )
+
     script_dir = Path(__file__).resolve().parent
     service_account_file = Path(
         os.getenv("SERVICE_ACCOUNT_FILE", str(script_dir / "service_account_credentials.json"))
     )
+    folder_id = os.getenv("GDRIVE_FOLDER_ID") or None
     names = os.getenv("GAME_PROCESS_NAMES", "BigAmbitions.exe,UnityPlayer.exe")
     process_names = tuple(n.strip() for n in names.split(",") if n.strip())
 
     return Config(
         savegames_root=savegames_root,
         service_account_file=service_account_file,
+        drive_folder_id=folder_id,
         process_names=process_names,
     )
 
@@ -376,37 +225,44 @@ def preflight(config: Config) -> list[str]:
     if not config.savegames_root.exists():
         errors.append(f"SaveGames klasörü bulunamadı: {config.savegames_root}")
     if not config.service_account_file.exists():
-        errors.append(f"Service account dosyası yok: {config.service_account_file}")
+        errors.append(
+            f"Service account dosyası yok: {config.service_account_file} "
+            "(service_account_credentials.json ekleyin veya SERVICE_ACCOUNT_FILE ayarlayın)"
+        )
     if not config.process_names:
         errors.append("GAME_PROCESS_NAMES boş olamaz.")
     return errors
 
 
 def run_loop(config: Config) -> None:
-    drive = DriveClient(config.service_account_file)
+    uploader = DriveUploader(config.service_account_file, config.drive_folder_id)
+
     observer: Optional[Observer] = None
     watched_folder: Optional[Path] = None
 
     print("[INFO] Otomasyon başladı. Oyun süreci izleniyor...")
     while True:
         try:
-            if is_game_running(config.process_names):
+            running = is_game_running(config.process_names)
+            if running:
                 latest_folder = find_latest_save_folder(config.savegames_root)
                 if latest_folder is None:
                     print("[WARN] En güncel save klasörü bulunamadı.")
                 else:
-                    tx = latest_folder / "transactions.csv"
-                    if tx.exists() and observer is None:
-                        handler = TransactionsHandler(drive, config.file_settle_seconds)
+                    transactions = latest_folder / "transactions.csv"
+                    if not transactions.exists():
+                        print(f"[WARN] transactions.csv yok: {transactions}")
+                    elif observer is None:
+                        handler = TransactionsHandler(uploader, config.file_settle_seconds)
                         observer = Observer()
                         observer.schedule(handler, str(latest_folder), recursive=False)
                         observer.start()
                         watched_folder = latest_folder
                         print(f"[INFO] İzleme başladı: {latest_folder}")
-                    elif tx.exists() and watched_folder != latest_folder and observer is not None:
+                    elif watched_folder != latest_folder:
                         observer.stop()
                         observer.join(timeout=5)
-                        handler = TransactionsHandler(drive, config.file_settle_seconds)
+                        handler = TransactionsHandler(uploader, config.file_settle_seconds)
                         observer = Observer()
                         observer.schedule(handler, str(latest_folder), recursive=False)
                         observer.start()
@@ -414,11 +270,11 @@ def run_loop(config: Config) -> None:
                         print(f"[INFO] İzlenen klasör güncellendi: {latest_folder}")
             else:
                 if observer is not None:
+                    print("[INFO] Oyun kapalı, izleme durduruldu.")
                     observer.stop()
                     observer.join(timeout=5)
                     observer = None
                     watched_folder = None
-                    print("[INFO] Oyun kapalı, izleme durdu.")
 
             time.sleep(config.poll_seconds)
         except KeyboardInterrupt:
@@ -435,19 +291,30 @@ def run_loop(config: Config) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Big Ambitions -> Google Drive otomasyonu")
-    parser.add_argument("--doctor", action="store_true", help="Sadece doğrulama yap ve çık")
-    parser.add_argument("--no-gui", action="store_true", help="GUI açmadan çalıştır")
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Sadece kurulum/doğrulama kontrolü yap ve çık.",
+    )
+    parser.add_argument(
+        "--no-gui",
+        action="store_true",
+        help="GUI açmadan doğrudan mevcut config ile çalıştır.",
+    )
     return parser.parse_args()
 
 
 def launch_config_gui(default_config: Config) -> Optional[Config]:
+    """Kullanıcıdan gerekli ayarları alır. İptal edilirse None döner."""
     result: dict[str, Config | None] = {"config": None}
+
     root = tk.Tk()
     root.title("Big Ambitions Drive Sync - Ayarlar")
     root.resizable(False, False)
 
     savegames_var = tk.StringVar(value=str(default_config.savegames_root))
     service_account_var = tk.StringVar(value=str(default_config.service_account_file))
+    folder_id_var = tk.StringVar(value=default_config.drive_folder_id or "")
     process_var = tk.StringVar(value=",".join(default_config.process_names))
     poll_var = tk.StringVar(value=str(default_config.poll_seconds))
     settle_var = tk.StringVar(value=str(default_config.file_settle_seconds))
@@ -469,22 +336,33 @@ def launch_config_gui(default_config: Config) -> Optional[Config]:
         try:
             poll_seconds = int(poll_var.get().strip())
             settle_seconds = int(settle_var.get().strip())
-            process_names = tuple(p.strip() for p in process_var.get().split(",") if p.strip())
+            if poll_seconds <= 0 or settle_seconds <= 0:
+                raise ValueError("Süre değerleri 0'dan büyük olmalı")
+
+            process_names = tuple(
+                p.strip() for p in process_var.get().split(",") if p.strip()
+            )
             cfg = Config(
                 savegames_root=Path(savegames_var.get().strip()),
                 service_account_file=Path(service_account_var.get().strip()),
+                drive_folder_id=folder_id_var.get().strip() or None,
                 process_names=process_names,
                 poll_seconds=poll_seconds,
                 file_settle_seconds=settle_seconds,
             )
+
             errors = preflight(cfg)
             if errors:
                 messagebox.showerror("Ayar Hatası", "\n".join(errors))
                 return
+
             result["config"] = cfg
             root.destroy()
-        except ValueError:
-            messagebox.showerror("Ayar Hatası", "Süre değerleri sayı olmalı.")
+        except ValueError as exc:
+            messagebox.showerror("Ayar Hatası", str(exc))
+
+    def on_cancel() -> None:
+        root.destroy()
 
     row = 0
     tk.Label(root, text="SaveGames klasörü").grid(row=row, column=0, sticky="w", padx=8, pady=6)
@@ -495,6 +373,10 @@ def launch_config_gui(default_config: Config) -> Optional[Config]:
     tk.Label(root, text="Service Account JSON").grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=service_account_var).grid(row=row, column=1, padx=8, pady=6)
     tk.Button(root, text="Seç", command=browse_service_account).grid(row=row, column=2, padx=8, pady=6)
+
+    row += 1
+    tk.Label(root, text="Drive Folder ID (opsiyonel)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Entry(root, width=60, textvariable=folder_id_var).grid(row=row, column=1, padx=8, pady=6)
 
     row += 1
     tk.Label(root, text="Process adları (virgülle)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
@@ -510,8 +392,9 @@ def launch_config_gui(default_config: Config) -> Optional[Config]:
 
     row += 1
     tk.Button(root, text="Başlat", command=on_start, width=18).grid(row=row, column=1, sticky="w", padx=8, pady=12)
-    tk.Button(root, text="İptal", command=root.destroy, width=12).grid(row=row, column=1, sticky="e", padx=8, pady=12)
+    tk.Button(root, text="İptal", command=on_cancel, width=12).grid(row=row, column=1, sticky="e", padx=8, pady=12)
 
+    root.protocol("WM_DELETE_WINDOW", on_cancel)
     root.mainloop()
     built = result["config"]
     return built if isinstance(built, Config) else None
@@ -520,19 +403,23 @@ def launch_config_gui(default_config: Config) -> Optional[Config]:
 def main() -> None:
     args = parse_args()
     default_config = build_default_config()
-    config = default_config if args.no_gui else launch_config_gui(default_config)
-    if config is None:
-        print("[INFO] İşlem iptal edildi.")
-        return
+
+    if args.no_gui:
+        config = default_config
+    else:
+        config = launch_config_gui(default_config)
+        if config is None:
+            print("[INFO] Kullanıcı GUI üzerinden işlemi iptal etti.")
+            return
 
     errors = preflight(config)
     if errors:
-        print("[PRECHECK] Hazır değil:")
+        print("[PRECHECK] Hazır değil. Tespit edilen sorunlar:")
         for issue in errors:
-            print(" -", issue)
+            print(f"  - {issue}")
         raise SystemExit(1)
 
-    print("[PRECHECK] Hazır.")
+    print("[PRECHECK] Hazır: temel kontroller geçti.")
     if args.doctor:
         return
 
