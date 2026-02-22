@@ -145,7 +145,10 @@ Windows'ta `set GDRIVE_FOLDER_ID=...` sadece açtığınız mevcut CMD oturumund
 Bu hata/uyarı genelde Windows'ta oyun dosyayı o anda yazarken oluşur. Yeni sürümde temp dosya yerine bellekten upload yapıldığı için kilit kaynaklı yan etkiler azaldı, ancak kaynak `transactions.csv` kilitliyse script kısa aralıklarla tekrar dener.
 
 ### `HTTP 404: File not found: .` / `location: fileId`
-Sebep: **Drive Folder ID** alanına geçersiz değer (ör. `.`) girilmiştir veya URL yanlış kopyalanmıştır.
+Sebep: **Drive Folder ID** alanına geçersiz değer (ör. `.`, `GDRIVE_FOLDER_ID`, `Drive Folder ID`) girilmiştir veya URL yanlış kopyalanmıştır.
+
+Not: ID doğru görünse bile, Service Account klasöre/Shared Drive'a ekli değilse Google Drive API bazen güvenlik nedeniyle yine `404 notFound` döndürebilir.
+Aynı durum, klasöre eklediğiniz hesapla **farklı bir service account JSON** dosyası kullandığınızda da görülür (örn. benzer isimli ama başka `client_email`).
 
 Çözüm:
 1. Google Drive klasörünüzü açın.
