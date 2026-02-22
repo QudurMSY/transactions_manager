@@ -13,13 +13,14 @@ Bu script şunları yapar:
 4) CSV'den ilk veri satırının B sütunundaki (index=1) gün bilgisini okur.
 5) Dosyayı transactionsgun_<gun>.csv adıyla Google Drive'a create/update eder.
 
-Önemli:
-- Service Account JSON dosyası varsayılan olarak script ile aynı klasörde
-  service_account_credentials.json adıyla beklenir.
+Kimlik doğrulama:
+- Yalnızca OAuth client JSON (`oauth_client_credentials.json` / `credentials.json`)
+  desteklenir; kişisel Google hesabı (My Drive) ile çalışır.
 
 Opsiyonel environment variable'lar:
-- SERVICE_ACCOUNT_FILE
+- GOOGLE_CREDENTIALS_FILE
 - GDRIVE_FOLDER_ID
+- GOOGLE_TOKEN_FILE
 - GAME_PROCESS_NAMES (varsayılan: Big Ambitions.exe,Big_Ambitions.exe,BigAmbitions.exe,UnityPlayer.exe)
 """
 
@@ -39,7 +40,9 @@ from typing import Optional
 from tkinter import filedialog, messagebox
 
 import psutil
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaInMemoryUpload
@@ -47,17 +50,15 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 # NOTE:
-# `drive.file` scope, service account kullanımında paylaşılan klasör metadata'sını
-# okurken 404/notFound benzeri yanıltıcı hatalara yol açabiliyor. Bu uygulama
-# hedef klasörü doğruladığı ve aynı klasörde create/update yaptığı için tam Drive
-# scope'u (`drive`) gerekiyor.
+# Bu uygulama hedef klasörü doğruladığı ve create/update yaptığı için
+# tam Drive scope'u (`drive`) kullanır.
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
 @dataclass
 class Config:
     savegames_root: Path
-    service_account_file: Path
+    credentials_file: Path
     drive_folder_id: Optional[str]
     process_names: tuple[str, ...]
     poll_seconds: int = 15
@@ -92,35 +93,42 @@ def normalize_drive_folder_id(raw_value: Optional[str]) -> Optional[str]:
 
 
 class DriveUploader:
-    """Service Account ile Drive create/update."""
+    """OAuth (kişisel Google hesabı) ile Drive create/update."""
 
-    def __init__(self, service_account_file: Path, folder_id: Optional[str] = None) -> None:
+    def __init__(self, credentials_file: Path, folder_id: Optional[str] = None) -> None:
         self.folder_id = folder_id
-        self.service_account_file = service_account_file
-        credentials = service_account.Credentials.from_service_account_file(
-            str(service_account_file), scopes=SCOPES
-        )
+        self.credentials_file = credentials_file
+        credentials = self._load_credentials(credentials_file)
         self.service = build("drive", "v3", credentials=credentials, cache_discovery=False)
 
-    def get_service_account_email(self) -> Optional[str]:
-        try:
-            payload = json.loads(self.service_account_file.read_text(encoding="utf-8"))
-            email = (payload.get("client_email") or "").strip()
-            return email or None
-        except Exception:
-            return None
+    @staticmethod
+    def _read_json(path: Path) -> dict:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
 
-    def _list_visible_shared_drives(self, page_size: int = 5) -> list[str]:
-        """Service Account'ın görebildiği Shared Drive adlarını döndürür."""
-        response = (
-            self.service.drives()
-            .list(pageSize=page_size, fields="drives(id,name)")
-            .execute()
-        )
-        return [
-            f"{drive.get('name', '(isimsiz)')} ({drive.get('id', 'id-yok')})"
-            for drive in response.get("drives", [])
-        ]
+    def _load_credentials(self, credentials_file: Path) -> Credentials:
+        payload = self._read_json(credentials_file)
+
+        oauth_config = payload.get("installed") or payload.get("web")
+        if not oauth_config:
+            raise RuntimeError(
+                "Desteklenmeyen credentials dosyası. Yalnızca OAuth client JSON kullanın."
+            )
+
+        token_file = Path(os.getenv("GOOGLE_TOKEN_FILE", str(credentials_file.with_name("token.json"))))
+        creds: Optional[Credentials] = None
+        if token_file.exists():
+            creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(str(credentials_file), SCOPES)
+                creds = flow.run_local_server(port=0)
+            token_file.write_text(creds.to_json(), encoding="utf-8")
+
+        return creds
 
     def describe_target_folder(self) -> str:
         if not self.folder_id:
@@ -137,41 +145,18 @@ class DriveUploader:
                 .execute()
             )
         except HttpError as exc:
-            base_error = explain_http_error(exc, self.folder_id, self.get_service_account_email())
-            if exc.resp is not None and exc.resp.status == 404:
-                try:
-                    drives = self._list_visible_shared_drives()
-                except Exception:
-                    drives = []
-
-                if drives:
-                    joined = "; ".join(drives)
-                    base_error += (
-                        " Görülebilen Shared Drive'lar: "
-                        f"{joined}. Eğer hedef klasör bunlardan farklıysa yanlış Service Account JSON kullanılıyor olabilir."
-                    )
-                else:
-                    base_error += (
-                        " Service Account bu credential ile hiçbir Shared Drive göremiyor olabilir "
-                        "(yanlış JSON dosyası, yanlış proje veya üyelik yok)."
-                    )
-            raise RuntimeError(base_error) from exc
+            raise RuntimeError(explain_http_error(exc, self.folder_id)) from exc
 
         folder_name = meta.get("name", "(isimsiz)")
         drive_id = meta.get("driveId")
         can_add_children = meta.get("capabilities", {}).get("canAddChildren")
         if can_add_children is False:
             raise RuntimeError(
-                "Drive klasörüne yazma yetkisi yok. Service Account'u (veya bağlı grubu) klasöre en az Editor yetkisiyle ekleyin."
+                "Drive klasörüne yazma yetkisi yok. Hesaba en az Editor yetkisi verin."
             )
 
         if not drive_id:
-            raise RuntimeError(
-                "Seçilen klasör bir Shared Drive içinde değil (My Drive klasörü görünüyor). "
-                "Service Account bu durumda yeni dosya oluştururken storageQuotaExceeded alır. "
-                "Çözüm: bir Shared Drive içinde klasör açın, bu klasör ID'sini GDRIVE_FOLDER_ID olarak verin "
-                "ve Service Account e-postasını Shared Drive'a Content manager/Manager olarak ekleyin."
-            )
+            return f"Doğrulandı: '{folder_name}' (My Drive klasörü)"
 
         return f"Doğrulandı: '{folder_name}' (driveId={drive_id})"
 
@@ -273,7 +258,7 @@ class TransactionsHandler(FileSystemEventHandler):
         except HttpError as exc:
             print(
                 "[ERROR] transactions.csv işleme hatası: "
-                f"{explain_http_error(exc, self.uploader.folder_id, self.uploader.get_service_account_email())}"
+                f"{explain_http_error(exc, self.uploader.folder_id)}"
             )
         except Exception as exc:
             print(f"[ERROR] transactions.csv işleme hatası: {exc}")
@@ -353,16 +338,20 @@ def build_default_config() -> Config:
     )
 
     script_dir = Path(__file__).resolve().parent
-    service_account_file = Path(
-        os.getenv("SERVICE_ACCOUNT_FILE", str(script_dir / "service_account_credentials.json"))
-    )
+    credentials_default = script_dir / "oauth_client_credentials.json"
+    if not credentials_default.exists():
+        alt_default = script_dir / "credentials.json"
+        if alt_default.exists():
+            credentials_default = alt_default
+
+    credentials_file = Path(os.getenv("GOOGLE_CREDENTIALS_FILE", str(credentials_default)))
     folder_id = normalize_drive_folder_id(os.getenv("GDRIVE_FOLDER_ID"))
     names = os.getenv("GAME_PROCESS_NAMES", "Big Ambitions.exe,Big_Ambitions.exe,BigAmbitions.exe,UnityPlayer.exe")
     process_names = tuple(n.strip() for n in names.split(",") if n.strip())
 
     return Config(
         savegames_root=savegames_root,
-        service_account_file=service_account_file,
+        credentials_file=credentials_file,
         drive_folder_id=folder_id,
         process_names=process_names,
     )
@@ -374,19 +363,14 @@ def preflight(config: Config) -> list[str]:
         errors.append("Bu script Windows path varsayımıyla yazıldı (os.name != 'nt').")
     if not config.savegames_root.exists():
         errors.append(f"SaveGames klasörü bulunamadı: {config.savegames_root}")
-    if not config.service_account_file.exists():
+    if not config.credentials_file.exists():
         errors.append(
-            f"Service account dosyası yok: {config.service_account_file} "
-            "(service_account_credentials.json ekleyin veya SERVICE_ACCOUNT_FILE ayarlayın)"
+            f"Google credentials dosyası yok: {config.credentials_file} "
+            "(oauth_client_credentials.json / credentials.json ekleyin veya GOOGLE_CREDENTIALS_FILE ayarlayın)"
         )
     if not config.process_names:
         errors.append("GAME_PROCESS_NAMES boş olamaz.")
-    if not config.drive_folder_id:
-        errors.append(
-            "Drive Folder ID gerekli. Service Account ile root'a yükleme (My Drive)"
-            " depolama kotası nedeniyle 403 verir."
-        )
-    elif len(config.drive_folder_id) < 10:
+    if config.drive_folder_id and len(config.drive_folder_id) < 10:
         errors.append(
             "Drive Folder ID geçersiz görünüyor. Yalnızca klasör ID'sini girin "
             "(örnek: 1AbCdEfGhIjKlMnOpQr). '.' veya kısa değerler kullanmayın."
@@ -397,7 +381,6 @@ def preflight(config: Config) -> list[str]:
 def explain_http_error(
     exc: HttpError,
     folder_id: Optional[str] = None,
-    service_account_email: Optional[str] = None,
 ) -> str:
     body = getattr(exc, "content", b"")
     try:
@@ -406,32 +389,25 @@ def explain_http_error(
         text = str(body)
 
     folder_hint = folder_id if folder_id else "<boş>"
-    sa_hint = service_account_email if service_account_email else "(json içinden okunamadı)"
-
     if exc.resp is not None and exc.resp.status == 403 and "storageQuotaExceeded" in text:
         return (
-            "Drive 403 storageQuotaExceeded: Service Account My Drive kotası olmadığı için "
-            "kişisel My Drive altına dosya oluşturamaz. Genellikle hedef klasör bir kullanıcının My Drive'ındadır. "
-            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}. "
-            "Çözüm: Shared Drive içinde bir klasör oluşturun, onun ID'sini verin ve Service Account'u "
-            f"('{sa_hint}') Shared Drive'a Content manager/Manager olarak ekleyin."
+            "Drive 403 storageQuotaExceeded: Kişisel Drive depolama kotanız dolu olabilir veya hedefe yazma izni yok. "
+            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}."
         )
 
     if exc.resp is not None and exc.resp.status == 404 and '"location": "fileId"' in text:
         return (
             "Drive 404 fileId notFound: Bu hata yalnızca 'ID yanlış' anlamına gelmez; "
-            "ID doğru olsa bile Service Account erişimi yoksa da 404 dönebilir. "
-            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}, Service Account={sa_hint}. "
+            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}. "
             "Kontrol edin: (1) URL'den gerçek klasör ID'si alındı mı, "
-            "(2) JSON'daki client_email gerçekten aynı klasöre/Shared Drive'a eklendi mi, "
-            "(3) yanlış service_account_credentials.json dosyası kullanılmıyor mu."
+            "(2) Google hesabınızın bu klasöre erişimi var mı."
         )
 
     return f"HTTP {getattr(exc.resp, 'status', 'unknown')}: {text}"
 
 
 def run_loop(config: Config) -> None:
-    uploader = DriveUploader(config.service_account_file, config.drive_folder_id)
+    uploader = DriveUploader(config.credentials_file, config.drive_folder_id)
 
     observer: Optional[Observer] = None
     watched_folder: Optional[Path] = None
@@ -487,7 +463,7 @@ def run_loop(config: Config) -> None:
         except HttpError as exc:
             print(
                 "[ERROR] Ana döngü hatası: "
-                f"{explain_http_error(exc, config.drive_folder_id, uploader.get_service_account_email())}"
+                f"{explain_http_error(exc, config.drive_folder_id)}"
             )
             time.sleep(config.poll_seconds)
         except Exception as exc:
@@ -521,7 +497,7 @@ def launch_config_gui(default_config: Config) -> None:
     root.resizable(False, False)
 
     savegames_var = tk.StringVar(value=str(default_config.savegames_root))
-    service_account_var = tk.StringVar(value=str(default_config.service_account_file))
+    credentials_var = tk.StringVar(value=str(default_config.credentials_file))
     folder_id_var = tk.StringVar(value=default_config.drive_folder_id or "")
     process_var = tk.StringVar(value=",".join(default_config.process_names))
     poll_var = tk.StringVar(value=str(default_config.poll_seconds))
@@ -535,13 +511,13 @@ def launch_config_gui(default_config: Config) -> None:
         if selected:
             savegames_var.set(selected)
 
-    def browse_service_account() -> None:
+    def browse_credentials_file() -> None:
         selected = filedialog.askopenfilename(
-            title="Service account JSON seç",
+            title="OAuth credentials JSON seç",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
         )
         if selected:
-            service_account_var.set(selected)
+            credentials_var.set(selected)
 
     def on_start() -> None:
         nonlocal runner_thread
@@ -556,7 +532,7 @@ def launch_config_gui(default_config: Config) -> None:
             )
             cfg = Config(
                 savegames_root=Path(savegames_var.get().strip()),
-                service_account_file=Path(service_account_var.get().strip()),
+                credentials_file=Path(credentials_var.get().strip()),
                 drive_folder_id=normalize_drive_folder_id(folder_id_var.get()),
                 process_names=process_names,
                 poll_seconds=poll_seconds,
@@ -592,9 +568,9 @@ def launch_config_gui(default_config: Config) -> None:
     tk.Button(root, text="Seç", command=browse_savegames).grid(row=row, column=2, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text="Service Account JSON").grid(row=row, column=0, sticky="w", padx=8, pady=6)
-    tk.Entry(root, width=60, textvariable=service_account_var).grid(row=row, column=1, padx=8, pady=6)
-    tk.Button(root, text="Seç", command=browse_service_account).grid(row=row, column=2, padx=8, pady=6)
+    tk.Label(root, text="OAuth Credentials JSON").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Entry(root, width=60, textvariable=credentials_var).grid(row=row, column=1, padx=8, pady=6)
+    tk.Button(root, text="Seç", command=browse_credentials_file).grid(row=row, column=2, padx=8, pady=6)
 
     row += 1
     tk.Label(root, text="Drive Folder ID").grid(row=row, column=0, sticky="w", padx=8, pady=6)
