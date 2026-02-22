@@ -103,6 +103,13 @@ python big_ambitions_drive_sync.py --no-gui
 
 ## Sık hata ve çözüm
 
+### Log seviyeleri ne anlama geliyor?
+- `[INFO]`: Normal durum bilgisi (izleme başlatıldı/durduruldu, duplicate event atlandı vb.).
+- `[WATCHDOG]`: Dosya sistemi değişimi algılandı (`transactions.csv` update event'i geldi).
+- `[DRIVE]`: Google Drive upload/update başarılı.
+- `[WARN]`: Geçici/iyileştirilebilir durum (dosya kilidi, klasör bulunamaması, gün değeri okunamaması vb.).
+- `[ERROR]`: İşlem hatası (Drive API veya beklenmeyen runtime hatası).
+
 ### `HttpError 403 storageQuotaExceeded`
 Sebep: Service Account ile My Drive root'a yazma denemesi.
 
@@ -113,6 +120,16 @@ Sebep: Service Account ile My Drive root'a yazma denemesi.
 
 ### `Geçici dosya silinemedi (WinError 32)`
 Windows'ta dosya başka process tarafından kısa süreli kilitli olabilir. Script yeniden dener; çoğu durumda kritik değildir.
+
+### `HTTP 404: File not found: .` / `location: fileId`
+Sebep: **Drive Folder ID** alanına geçersiz değer (ör. `.`) girilmiştir veya URL yanlış kopyalanmıştır.
+
+Çözüm:
+1. Google Drive klasörünüzü açın.
+2. URL'den yalnızca klasör ID kısmını alın:
+   - `https://drive.google.com/drive/folders/<BURASI_FOLDER_ID>`
+3. Uygulamadaki **Drive Folder ID** alanına yalnızca bu ID'yi girin.
+4. Klasörün service account e-postası ile paylaşıldığını kontrol edin.
 
 ---
 
