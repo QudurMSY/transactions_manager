@@ -60,6 +60,26 @@ class Config:
     file_settle_seconds: int = 10
 
 
+def normalize_drive_folder_id(raw_value: Optional[str]) -> Optional[str]:
+    """Drive folder ID değerini normalize eder.
+
+    - Boş/None -> None
+    - URL verildiyse klasör ID'sini ayıklar
+    - `.` gibi geçersiz placeholder değerleri temizler
+    """
+    if raw_value is None:
+        return None
+
+    value = raw_value.strip()
+    if not value or value in {".", "./", "root"}:
+        return None
+
+    if "drive.google.com" in value and "/folders/" in value:
+        value = value.split("/folders/", 1)[1].split("?", 1)[0].split("/", 1)[0].strip()
+
+    return value or None
+
+
 class DriveUploader:
     """Service Account ile Drive create/update."""
 
@@ -272,7 +292,7 @@ def build_default_config() -> Config:
     service_account_file = Path(
         os.getenv("SERVICE_ACCOUNT_FILE", str(script_dir / "service_account_credentials.json"))
     )
-    folder_id = os.getenv("GDRIVE_FOLDER_ID") or None
+    folder_id = normalize_drive_folder_id(os.getenv("GDRIVE_FOLDER_ID"))
     names = os.getenv("GAME_PROCESS_NAMES", "BigAmbitions.exe,UnityPlayer.exe")
     process_names = tuple(n.strip() for n in names.split(",") if n.strip())
 
@@ -302,6 +322,11 @@ def preflight(config: Config) -> list[str]:
             "Drive Folder ID gerekli. Service Account ile root'a yükleme (My Drive)"
             " depolama kotası nedeniyle 403 verir."
         )
+    elif len(config.drive_folder_id) < 10:
+        errors.append(
+            "Drive Folder ID geçersiz görünüyor. Yalnızca klasör ID'sini girin "
+            "(örnek: 1AbCdEfGhIjKlMnOpQr). '.' veya kısa değerler kullanmayın."
+        )
     return errors
 
 
@@ -317,6 +342,13 @@ def explain_http_error(exc: HttpError) -> str:
             "Drive 403 storageQuotaExceeded: Service Account kişisel My Drive alanına"
             " yazamaz. GDRIVE_FOLDER_ID ile paylaşımlı sürücü/klasör ID'si verin"
             " ve bu klasörü Service Account e-postasıyla paylaşın."
+        )
+
+    if exc.resp is not None and exc.resp.status == 404 and '"location": "fileId"' in text:
+        return (
+            "Drive 404 fileId notFound: GDRIVE_FOLDER_ID/Drive Folder ID geçersiz. "
+            "ID yerine '.' veya hatalı URL/klasör adı girilmiş olabilir. "
+            "Drive klasör URL'sindeki gerçek ID değerini girin."
         )
 
     return f"HTTP {getattr(exc.resp, 'status', 'unknown')}: {text}"
@@ -438,7 +470,7 @@ def launch_config_gui(default_config: Config) -> None:
             cfg = Config(
                 savegames_root=Path(savegames_var.get().strip()),
                 service_account_file=Path(service_account_var.get().strip()),
-                drive_folder_id=folder_id_var.get().strip() or None,
+                drive_folder_id=normalize_drive_folder_id(folder_id_var.get()),
                 process_names=process_names,
                 poll_seconds=poll_seconds,
                 file_settle_seconds=settle_seconds,
