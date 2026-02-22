@@ -29,8 +29,6 @@ import argparse
 import csv
 import errno
 import os
-import shutil
-import tempfile
 import threading
 import time
 import tkinter as tk
@@ -43,7 +41,7 @@ import psutil
 from google.oauth2 import service_account
 from googleapiclient.errors import HttpError
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaInMemoryUpload
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -118,9 +116,9 @@ class DriveUploader:
         files = response.get("files", [])
         return files[0]["id"] if files else None
 
-    def upload_or_update(self, local_file: Path, drive_name: str) -> str:
-        media = MediaFileUpload(str(local_file), mimetype="text/csv", resumable=False)
+    def upload_or_update(self, csv_bytes: bytes, drive_name: str) -> str:
         existing_id = self._find_existing_file_id(drive_name)
+        media = MediaInMemoryUpload(csv_bytes, mimetype="text/csv", resumable=False)
 
         if existing_id:
             self.service.files().update(
@@ -180,14 +178,11 @@ class TransactionsHandler(FileSystemEventHandler):
                 return
 
             drive_name = f"transactionsgun_{day_value}.csv"
-            tmp_file = self._prepare_named_copy(changed_file, drive_name)
-            try:
-                result = self.uploader.upload_or_update(tmp_file, drive_name)
-                print(f"[DRIVE] {result}")
-                self._last_uploaded_day = day_value
-                self._last_uploaded_mtime = file_mtime
-            finally:
-                self._safe_unlink(tmp_file)
+            csv_bytes = self._read_csv_bytes_with_retry(changed_file)
+            result = self.uploader.upload_or_update(csv_bytes, drive_name)
+            print(f"[DRIVE] {result}")
+            self._last_uploaded_day = day_value
+            self._last_uploaded_mtime = file_mtime
         except HttpError as exc:
             print(f"[ERROR] transactions.csv işleme hatası: {explain_http_error(exc)}")
         except Exception as exc:
@@ -214,16 +209,10 @@ class TransactionsHandler(FileSystemEventHandler):
         return None
 
     @staticmethod
-    def _prepare_named_copy(source_file: Path, target_name: str) -> Path:
-        prefix = Path(target_name).stem + "_"
-        suffix = Path(target_name).suffix or ".csv"
-        with tempfile.NamedTemporaryFile(prefix=prefix, suffix=suffix, delete=False) as tmp:
-            target_path = Path(tmp.name)
-
+    def _read_csv_bytes_with_retry(source_file: Path) -> bytes:
         for attempt in range(1, 6):
             try:
-                shutil.copy2(source_file, target_path)
-                return target_path
+                return source_file.read_bytes()
             except PermissionError as exc:
                 if attempt == 5:
                     raise
@@ -231,22 +220,7 @@ class TransactionsHandler(FileSystemEventHandler):
                     raise
                 time.sleep(0.4 * attempt)
 
-        return target_path
-
-    @staticmethod
-    def _safe_unlink(file_path: Path) -> None:
-        for attempt in range(1, 6):
-            try:
-                file_path.unlink(missing_ok=True)
-                return
-            except PermissionError as exc:
-                if attempt == 5:
-                    print(f"[WARN] Geçici dosya silinemedi: {file_path} ({exc})")
-                    return
-                if getattr(exc, "winerror", None) != 32 and exc.errno != errno.EACCES:
-                    print(f"[WARN] Geçici dosya silinirken beklenmeyen hata: {file_path} ({exc})")
-                    return
-                time.sleep(0.4 * attempt)
+        raise RuntimeError("transactions.csv okunamadı")
 
 
 def is_game_running(process_names: tuple[str, ...]) -> bool:
@@ -360,6 +334,8 @@ def run_loop(config: Config) -> None:
     observer: Optional[Observer] = None
     watched_folder: Optional[Path] = None
 
+    target_info = config.drive_folder_id if config.drive_folder_id else "<yok>"
+    print(f"[INFO] Drive hedef klasör ID: {target_info}")
     print("[INFO] Otomasyon başladı. Oyun süreci izleniyor...")
     while True:
         try:
