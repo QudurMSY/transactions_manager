@@ -121,13 +121,15 @@ Sebep: Service Account hesabının kişisel **My Drive** depolama alanı yoktur.
 4. Bu ID'yi uygulamaya verin:
    - GUI: **Drive Folder ID**
    - veya ortam değişkeni: `GDRIVE_FOLDER_ID=<BURASI_FOLDER_ID>`
+   - uygulama açılışında logda `Drive hedef klasör ID: ...` satırını kontrol edin (`<yok>` görünüyorsa ID gelmemiştir).
 5. Doğrulama için çalıştırın:
    - `python big_ambitions_drive_sync.py --doctor --no-gui`
 
 İpucu: `.`, `root`, kısa/eksik ID ya da klasör adı (ID yerine) kullanmayın.
+Windows'ta `set GDRIVE_FOLDER_ID=...` sadece açtığınız mevcut CMD oturumunda geçerlidir; scripti başka yerden (ör. çift tık) başlatırsanız değişken taşınmayabilir.
 
-### `Geçici dosya silinemedi (WinError 32)`
-Windows'ta dosya başka process tarafından kısa süreli kilitli olabilir. Script yeniden dener; çoğu durumda kritik değildir.
+### `WinError 32` (dosya kullanımda)
+Bu hata/uyarı genelde Windows'ta oyun dosyayı o anda yazarken oluşur. Yeni sürümde temp dosya yerine bellekten upload yapıldığı için kilit kaynaklı yan etkiler azaldı, ancak kaynak `transactions.csv` kilitliyse script kısa aralıklarla tekrar dener.
 
 ### `HTTP 404: File not found: .` / `location: fileId`
 Sebep: **Drive Folder ID** alanına geçersiz değer (ör. `.`) girilmiştir veya URL yanlış kopyalanmıştır.
