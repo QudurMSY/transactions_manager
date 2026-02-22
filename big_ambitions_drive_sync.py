@@ -46,7 +46,12 @@ from googleapiclient.http import MediaInMemoryUpload
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+# NOTE:
+# `drive.file` scope, service account kullanımında paylaşılan klasör metadata'sını
+# okurken 404/notFound benzeri yanıltıcı hatalara yol açabiliyor. Bu uygulama
+# hedef klasörü doğruladığı ve aynı klasörde create/update yaptığı için tam Drive
+# scope'u (`drive`) gerekiyor.
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
 @dataclass
@@ -400,9 +405,10 @@ def explain_http_error(
     except Exception:
         text = str(body)
 
+    folder_hint = folder_id if folder_id else "<boş>"
+    sa_hint = service_account_email if service_account_email else "(json içinden okunamadı)"
+
     if exc.resp is not None and exc.resp.status == 403 and "storageQuotaExceeded" in text:
-        folder_hint = folder_id if folder_id else "<boş>"
-        sa_hint = service_account_email if service_account_email else "(json içinden okunamadı)"
         return (
             "Drive 403 storageQuotaExceeded: Service Account My Drive kotası olmadığı için "
             "kişisel My Drive altına dosya oluşturamaz. Genellikle hedef klasör bir kullanıcının My Drive'ındadır. "
@@ -413,11 +419,12 @@ def explain_http_error(
 
     if exc.resp is not None and exc.resp.status == 404 and '"location": "fileId"' in text:
         return (
-            "Drive 404 fileId notFound: GDRIVE_FOLDER_ID/Drive Folder ID geçersiz. "
-            "ID yerine '.' veya hatalı URL/klasör adı girilmiş olabilir. "
-            "Ayrıca klasör ID doğru olsa bile, Service Account klasöre/Shared Drive'a ekli değilse "
-            "Drive API güvenlik nedeniyle 404 dönebilir. Drive klasör URL'sindeki gerçek ID'yi girin "
-            "ve Service Account erişimini kontrol edin."
+            "Drive 404 fileId notFound: Bu hata yalnızca 'ID yanlış' anlamına gelmez; "
+            "ID doğru olsa bile Service Account erişimi yoksa da 404 dönebilir. "
+            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}, Service Account={sa_hint}. "
+            "Kontrol edin: (1) URL'den gerçek klasör ID'si alındı mı, "
+            "(2) JSON'daki client_email gerçekten aynı klasöre/Shared Drive'a eklendi mi, "
+            "(3) yanlış service_account_credentials.json dosyası kullanılmıyor mu."
         )
 
     return f"HTTP {getattr(exc.resp, 'status', 'unknown')}: {text}"

@@ -22,6 +22,8 @@ pip install -r requirements.txt
 
 Bu uygulama **OAuth popup** açmaz; bunun yerine **Service Account JSON** kullanır.
 
+> Not: Script artık Drive API için `drive` scope'u kullanır (önceki `drive.file` yerine). Service account ile paylaşılan klasör doğrulamasında görülen sahte `404 notFound` vakalarını azaltmak için gereklidir.
+
 ### 1) Google Cloud projesi oluştur
 1. https://console.cloud.google.com/ aç.
 2. Sağ üstten mevcut bir proje seç veya **New Project** ile yeni bir proje oluştur.
@@ -150,12 +152,18 @@ Sebep: **Drive Folder ID** alanına geçersiz değer (ör. `.`, `GDRIVE_FOLDER_I
 Not: ID doğru görünse bile, Service Account klasöre/Shared Drive'a ekli değilse Google Drive API bazen güvenlik nedeniyle yine `404 notFound` döndürebilir.
 Aynı durum, klasöre eklediğiniz hesapla **farklı bir service account JSON** dosyası kullandığınızda da görülür (örn. benzer isimli ama başka `client_email`).
 
+Neden önceki düzeltme tek başına her zaman yetmeyebilir?
+- `drive` scope'a geçmek bazı "yetki kısıtlılığı" kaynaklı sahte 404 vakalarını azaltır.
+- Ancak **yanlış klasör ID**, **yanlış JSON dosyası** veya **service account üyeliği eksikse** hata devam eder.
+- Bu yüzden uygulama artık hata mesajında kullanılan `GDRIVE_FOLDER_ID` ve `client_email` bilgisini de gösterir; doğru hesapla doğru klasörü eşleştirmeyi kolaylaştırır.
+
 Çözüm:
 1. Google Drive klasörünüzü açın.
 2. URL'den yalnızca klasör ID kısmını alın:
    - `https://drive.google.com/drive/folders/<BURASI_FOLDER_ID>`
 3. Uygulamadaki **Drive Folder ID** alanına yalnızca bu ID'yi girin.
 4. Klasörün service account e-postası ile paylaşıldığını kontrol edin.
+5. JSON içindeki `client_email` ile Drive'a eklediğiniz e-postanın birebir aynı olduğundan emin olun.
 
 ---
 
