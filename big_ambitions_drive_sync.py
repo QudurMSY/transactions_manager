@@ -31,6 +31,7 @@ import errno
 import os
 import shutil
 import tempfile
+import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ from tkinter import filedialog, messagebox
 
 import psutil
 from google.oauth2 import service_account
+from googleapiclient.errors import HttpError
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -68,6 +70,19 @@ class DriveUploader:
         )
         self.service = build("drive", "v3", credentials=credentials, cache_discovery=False)
 
+    @property
+    def _list_kwargs(self) -> dict[str, object]:
+        kwargs: dict[str, object] = {
+            "spaces": "drive",
+            "fields": "files(id, name)",
+            "pageSize": 1,
+            "supportsAllDrives": True,
+            "includeItemsFromAllDrives": True,
+        }
+        if self.folder_id:
+            kwargs["corpora"] = "allDrives"
+        return kwargs
+
     def _find_existing_file_id(self, file_name: str) -> Optional[str]:
         safe_name = file_name.replace("'", "\\'")
         query_parts = [f"name = '{safe_name}'", "trashed = false"]
@@ -77,7 +92,7 @@ class DriveUploader:
 
         response = (
             self.service.files()
-            .list(q=query, spaces="drive", fields="files(id, name)", pageSize=1)
+            .list(q=query, **self._list_kwargs)
             .execute()
         )
         files = response.get("files", [])
@@ -88,14 +103,27 @@ class DriveUploader:
         existing_id = self._find_existing_file_id(drive_name)
 
         if existing_id:
-            self.service.files().update(fileId=existing_id, media_body=media).execute()
+            self.service.files().update(
+                fileId=existing_id,
+                media_body=media,
+                supportsAllDrives=True,
+            ).execute()
             return f"Updated: {drive_name} (id={existing_id})"
 
         metadata = {"name": drive_name}
         if self.folder_id:
             metadata["parents"] = [self.folder_id]
 
-        created = self.service.files().create(body=metadata, media_body=media, fields="id").execute()
+        created = (
+            self.service.files()
+            .create(
+                body=metadata,
+                media_body=media,
+                fields="id",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
         return f"Created: {drive_name} (id={created.get('id')})"
 
 
@@ -140,6 +168,8 @@ class TransactionsHandler(FileSystemEventHandler):
                 self._last_uploaded_mtime = file_mtime
             finally:
                 self._safe_unlink(tmp_file)
+        except HttpError as exc:
+            print(f"[ERROR] transactions.csv işleme hatası: {explain_http_error(exc)}")
         except Exception as exc:
             print(f"[ERROR] transactions.csv işleme hatası: {exc}")
 
@@ -267,7 +297,29 @@ def preflight(config: Config) -> list[str]:
         )
     if not config.process_names:
         errors.append("GAME_PROCESS_NAMES boş olamaz.")
+    if not config.drive_folder_id:
+        errors.append(
+            "Drive Folder ID gerekli. Service Account ile root'a yükleme (My Drive)"
+            " depolama kotası nedeniyle 403 verir."
+        )
     return errors
+
+
+def explain_http_error(exc: HttpError) -> str:
+    body = getattr(exc, "content", b"")
+    try:
+        text = body.decode("utf-8", errors="replace")
+    except Exception:
+        text = str(body)
+
+    if exc.resp is not None and exc.resp.status == 403 and "storageQuotaExceeded" in text:
+        return (
+            "Drive 403 storageQuotaExceeded: Service Account kişisel My Drive alanına"
+            " yazamaz. GDRIVE_FOLDER_ID ile paylaşımlı sürücü/klasör ID'si verin"
+            " ve bu klasörü Service Account e-postasıyla paylaşın."
+        )
+
+    return f"HTTP {getattr(exc.resp, 'status', 'unknown')}: {text}"
 
 
 def run_loop(config: Config) -> None:
@@ -316,6 +368,9 @@ def run_loop(config: Config) -> None:
         except KeyboardInterrupt:
             print("[INFO] Çıkış sinyali alındı.")
             break
+        except HttpError as exc:
+            print(f"[ERROR] Ana döngü hatası: {explain_http_error(exc)}")
+            time.sleep(config.poll_seconds)
         except Exception as exc:
             print(f"[ERROR] Ana döngü hatası: {exc}")
             time.sleep(config.poll_seconds)
@@ -340,10 +395,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def launch_config_gui(default_config: Config) -> Optional[Config]:
-    """Kullanıcıdan gerekli ayarları alır. İptal edilirse None döner."""
-    result: dict[str, Config | None] = {"config": None}
-
+def launch_config_gui(default_config: Config) -> None:
+    """Kullanıcıdan ayarları alır ve izlemeyi GUI açık kalırken arka planda başlatır."""
     root = tk.Tk()
     root.title("Big Ambitions Drive Sync - Ayarlar")
     root.resizable(False, False)
@@ -354,6 +407,9 @@ def launch_config_gui(default_config: Config) -> Optional[Config]:
     process_var = tk.StringVar(value=",".join(default_config.process_names))
     poll_var = tk.StringVar(value=str(default_config.poll_seconds))
     settle_var = tk.StringVar(value=str(default_config.file_settle_seconds))
+    status_var = tk.StringVar(value="Durum: Hazır")
+
+    runner_thread: Optional[threading.Thread] = None
 
     def browse_savegames() -> None:
         selected = filedialog.askdirectory(title="SaveGames klasörünü seç")
@@ -369,6 +425,7 @@ def launch_config_gui(default_config: Config) -> Optional[Config]:
             service_account_var.set(selected)
 
     def on_start() -> None:
+        nonlocal runner_thread
         try:
             poll_seconds = int(poll_var.get().strip())
             settle_seconds = int(settle_var.get().strip())
@@ -392,8 +449,18 @@ def launch_config_gui(default_config: Config) -> Optional[Config]:
                 messagebox.showerror("Ayar Hatası", "\n".join(errors))
                 return
 
-            result["config"] = cfg
-            root.destroy()
+            if runner_thread and runner_thread.is_alive():
+                messagebox.showinfo("Bilgi", "İzleme zaten çalışıyor.")
+                return
+
+            runner_thread = threading.Thread(target=run_loop, args=(cfg,), daemon=True)
+            runner_thread.start()
+            status_var.set("Durum: İzleme başladı (pencere açık kalır)")
+            start_button.config(state="disabled")
+            messagebox.showinfo(
+                "Başlatıldı",
+                "İzleme arka planda başladı. Bu pencere kapanmadı; durum takibi için açık kalabilir.",
+            )
         except ValueError as exc:
             messagebox.showerror("Ayar Hatası", str(exc))
 
@@ -411,7 +478,7 @@ def launch_config_gui(default_config: Config) -> Optional[Config]:
     tk.Button(root, text="Seç", command=browse_service_account).grid(row=row, column=2, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text="Drive Folder ID (opsiyonel)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Label(root, text="Drive Folder ID").grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=folder_id_var).grid(row=row, column=1, padx=8, pady=6)
 
     row += 1
@@ -427,13 +494,19 @@ def launch_config_gui(default_config: Config) -> Optional[Config]:
     tk.Entry(root, width=20, textvariable=settle_var).grid(row=row, column=1, sticky="w", padx=8, pady=6)
 
     row += 1
-    tk.Button(root, text="Başlat", command=on_start, width=18).grid(row=row, column=1, sticky="w", padx=8, pady=12)
-    tk.Button(root, text="İptal", command=on_cancel, width=12).grid(row=row, column=1, sticky="e", padx=8, pady=12)
+    tk.Label(root, textvariable=status_var, fg="#0a5").grid(
+        row=row, column=0, columnspan=3, sticky="w", padx=8, pady=6
+    )
+
+    row += 1
+    start_button = tk.Button(root, text="Başlat", command=on_start, width=18)
+    start_button.grid(row=row, column=1, sticky="w", padx=8, pady=12)
+    tk.Button(root, text="Kapat", command=on_cancel, width=12).grid(
+        row=row, column=1, sticky="e", padx=8, pady=12
+    )
 
     root.protocol("WM_DELETE_WINDOW", on_cancel)
     root.mainloop()
-    built = result["config"]
-    return built if isinstance(built, Config) else None
 
 
 def main() -> None:
@@ -442,24 +515,21 @@ def main() -> None:
 
     if args.no_gui:
         config = default_config
-    else:
-        config = launch_config_gui(default_config)
-        if config is None:
-            print("[INFO] Kullanıcı GUI üzerinden işlemi iptal etti.")
+        errors = preflight(config)
+        if errors:
+            print("[PRECHECK] Hazır değil. Tespit edilen sorunlar:")
+            for issue in errors:
+                print(f"  - {issue}")
+            raise SystemExit(1)
+
+        print("[PRECHECK] Hazır: temel kontroller geçti.")
+        if args.doctor:
             return
 
-    errors = preflight(config)
-    if errors:
-        print("[PRECHECK] Hazır değil. Tespit edilen sorunlar:")
-        for issue in errors:
-            print(f"  - {issue}")
-        raise SystemExit(1)
-
-    print("[PRECHECK] Hazır: temel kontroller geçti.")
-    if args.doctor:
+        run_loop(config)
         return
 
-    run_loop(config)
+    launch_config_gui(default_config)
 
 
 if __name__ == "__main__":
