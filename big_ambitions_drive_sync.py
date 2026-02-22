@@ -69,8 +69,15 @@ def normalize_drive_folder_id(raw_value: Optional[str]) -> Optional[str]:
     if raw_value is None:
         return None
 
-    value = raw_value.strip()
+    value = raw_value.strip().strip('"').strip("'")
     if not value or value in {".", "./", "root"}:
+        return None
+
+    # Sık yapılan hatalar: placeholder/metin değeri doğrudan yapıştırılıyor.
+    lowered = value.lower()
+    if lowered in {"gdrive_folder_id", "drive_folder_id", "folder_id"}:
+        return None
+    if " " in value and "folder" in lowered and "id" in lowered:
         return None
 
     if "drive.google.com" in value and "/folders/" in value:
@@ -98,6 +105,18 @@ class DriveUploader:
         except Exception:
             return None
 
+    def _list_visible_shared_drives(self, page_size: int = 5) -> list[str]:
+        """Service Account'ın görebildiği Shared Drive adlarını döndürür."""
+        response = (
+            self.service.drives()
+            .list(pageSize=page_size, fields="drives(id,name)")
+            .execute()
+        )
+        return [
+            f"{drive.get('name', '(isimsiz)')} ({drive.get('id', 'id-yok')})"
+            for drive in response.get("drives", [])
+        ]
+
     def describe_target_folder(self) -> str:
         if not self.folder_id:
             return "Drive hedef klasör ID verilmedi (GDRIVE_FOLDER_ID boş)."
@@ -113,7 +132,25 @@ class DriveUploader:
                 .execute()
             )
         except HttpError as exc:
-            raise RuntimeError(explain_http_error(exc, self.folder_id, self.get_service_account_email())) from exc
+            base_error = explain_http_error(exc, self.folder_id, self.get_service_account_email())
+            if exc.resp is not None and exc.resp.status == 404:
+                try:
+                    drives = self._list_visible_shared_drives()
+                except Exception:
+                    drives = []
+
+                if drives:
+                    joined = "; ".join(drives)
+                    base_error += (
+                        " Görülebilen Shared Drive'lar: "
+                        f"{joined}. Eğer hedef klasör bunlardan farklıysa yanlış Service Account JSON kullanılıyor olabilir."
+                    )
+                else:
+                    base_error += (
+                        " Service Account bu credential ile hiçbir Shared Drive göremiyor olabilir "
+                        "(yanlış JSON dosyası, yanlış proje veya üyelik yok)."
+                    )
+            raise RuntimeError(base_error) from exc
 
         folder_name = meta.get("name", "(isimsiz)")
         drive_id = meta.get("driveId")
@@ -378,7 +415,9 @@ def explain_http_error(
         return (
             "Drive 404 fileId notFound: GDRIVE_FOLDER_ID/Drive Folder ID geçersiz. "
             "ID yerine '.' veya hatalı URL/klasör adı girilmiş olabilir. "
-            "Drive klasör URL'sindeki gerçek ID değerini girin."
+            "Ayrıca klasör ID doğru olsa bile, Service Account klasöre/Shared Drive'a ekli değilse "
+            "Drive API güvenlik nedeniyle 404 dönebilir. Drive klasör URL'sindeki gerçek ID'yi girin "
+            "ve Service Account erişimini kontrol edin."
         )
 
     return f"HTTP {getattr(exc.resp, 'status', 'unknown')}: {text}"
