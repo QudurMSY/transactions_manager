@@ -1,193 +1,122 @@
 # Big Ambitions Drive Sync
 
-## Türkçe
+Big Ambitions oyunundaki `transactions.csv` dosyasını izler, değişim oldukça dosyayı Google Drive'a yükler.
 
-Bu araç, Big Ambitions `transactions.csv` dosyasını izleyip Google Drive'da otomatik klasörler ve Excel raporları üretir.
-
-### Klasör / rapor yapısı
-
-Drive'da otomatik olarak:
-- `big ambitions/` kök klasörü oluşturulur
-- Gün değerine göre dönem klasörü açılır:
-  - `1-60`, `61-120`, `121-180`, ...
-- Her dönemde:
-  - `transactionsgun_<gun>.csv`
-  - `main.xlsx` (C sütunundaki type ve D sütunundaki value için Excel `SUMIF` özeti)
-- Kökte:
-  - `main_total.xlsx` (tüm dönemlerin toplam özeti)
-
-> Hesaplamalar Python'da toplanmaz; Excel dosyaları içine formül olarak yazılır.
-
-### Kurulum
-
-```bash
-pip install -r requirements.txt
-```
-
-### Çalıştırma
-
-#### GUI ile (önerilen)
-```bash
-python big_ambitions_drive_sync.py
-```
-
-#### GUI olmadan
-```bash
-python big_ambitions_drive_sync.py --no-gui
-```
-
-#### Sadece ön kontrol
-```bash
-python big_ambitions_drive_sync.py --doctor --no-gui
-```
-
-### Gerekli dosya
-- `service_account_credentials.json` (varsayılan olarak script ile aynı klasörde)
-- veya `SERVICE_ACCOUNT_FILE` env ile farklı yol verilebilir.
-
-### Service Account JSON nasıl hazırlanır? (Google Cloud temel anlatım)
-
-Bu proje kullanıcı girişi (OAuth popup) açmaz. Bu yüzden bir **Service Account JSON key** gerekir.
-
-1. **Google Cloud Console** aç: https://console.cloud.google.com/
-2. Üstten bir **Project** seç veya yeni bir proje oluştur.
-3. Sol menüden **APIs & Services > Library** bölümüne gir, **Google Drive API** ara ve **Enable** et.
-4. Sol menüden **APIs & Services > Credentials** bölümüne gir.
-5. **Create Credentials > Service account** seç.
-6. Service account adı ver (ör. `big-ambitions-sync`) ve oluştur.
-7. Oluşturduktan sonra service account içine gir, **Keys** sekmesinden:
-   - **Add Key > Create new key > JSON**
-   - JSON dosyasını indir.
-8. İndirilen JSON'u proje klasörüne kopyala ve adını:
-   - `service_account_credentials.json` yap
-   - (veya farklı konum kullanacaksan `SERVICE_ACCOUNT_FILE` ortam değişkeni ayarla).
-
-#### Drive erişim izni verme
-Service account bir robot kullanıcıdır. Drive'da dosya yazabilmesi için izin gerekir:
-
-- Drive'da kullanacağın klasörü aç.
-- **Share / Paylaş** ile service account e-posta adresini ekle
-  (JSON dosyasındaki `client_email`).
-- En az **Editor** yetkisi ver.
-
-> Eğer paylaşım yapılmazsa script API ile bağlansa bile hedef klasöre yazamayabilir.
-
-### Notlar
-- Oyun açıkken watcher aktif olur, kapanınca durur.
-- Programı istediğin gün başlatıp durdurabilirsin; sadece var olan CSV dosyaları üzerinden rapor oluşturulur.
-- Harcama tiplerini hardcode etmeye gerek yok; dosyalardan dinamik toplanır.
+## Ne yapar?
+- Oyun açıkken save klasörünü izler.
+- `transactions.csv` değişince kısa süre bekler (dosya yazımı tamamlansın diye).
+- CSV içinden gün (`day`) değerini okur.
+- Dosyayı `transactionsgun_<gun>.csv` adıyla Drive'a yükler/günceller.
 
 ---
 
-## English
-
-This tool watches Big Ambitions `transactions.csv` and automatically creates Google Drive folders and Excel reports.
-
-### Folder / report structure
-
-On Drive, it automatically creates:
-- a root folder: `big ambitions/`
-- 60-day period folders by in-game day:
-  - `1-60`, `61-120`, `121-180`, ...
-- in each period folder:
-  - `transactionsgun_<day>.csv`
-  - `main.xlsx` (Excel `SUMIF` summary using type in column C and value in column D)
-- in root:
-  - `main_total.xlsx` (overall summary across all period folders)
-
-> Calculations are not aggregated in Python; formulas are written into Excel files.
-
-### Installation
+## Kurulum
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Run
+---
 
-#### With GUI (recommended)
+## Google Cloud + Google Drive kurulumu (adım adım)
+
+Bu uygulama **OAuth popup** açmaz; bunun yerine **Service Account JSON** kullanır.
+
+### 1) Google Cloud projesi oluştur
+1. https://console.cloud.google.com/ aç.
+2. Sağ üstten mevcut bir proje seç veya **New Project** ile yeni bir proje oluştur.
+
+### 2) Google Drive API'yi aç
+1. Sol menü: **APIs & Services > Library**.
+2. `Google Drive API` ara.
+3. **Enable** tıkla.
+
+### 3) Service Account oluştur
+1. Sol menü: **APIs & Services > Credentials**.
+2. **Create Credentials > Service account**.
+3. Hesaba isim ver (ör. `big-ambitions-sync`) ve oluştur.
+
+### 4) JSON key indir
+1. Oluşturulan service account detayına gir.
+2. **Keys** sekmesi.
+3. **Add key > Create new key > JSON**.
+4. İnen dosyayı projeye kopyala:
+   - Varsayılan ad: `service_account_credentials.json`
+   - veya farklı bir yol için `SERVICE_ACCOUNT_FILE` kullan.
+
+### 5) Drive klasörü oluştur ve paylaş
+> Önemli: Service Account'un kişisel “My Drive” kotası yoktur. Bu yüzden bir hedef klasör ID'si girmeniz gerekir.
+
+1. Google Drive'da bir klasör aç/oluştur (ör. `BigAmbitionsSync`).
+2. **Share / Paylaş** deyip service account e-postasını ekle:
+   - JSON içindeki `client_email` alanı.
+3. Yetkiyi en az **Editor** ver.
+4. Klasör URL’sinden klasör ID’yi al:
+   - `https://drive.google.com/drive/folders/<BURASI_FOLDER_ID>`
+
+### 6) Uygulamaya Folder ID ver
+Aşağıdakilerden biriyle verilebilir:
+- GUI’de **Drive Folder ID** alanına yapıştır.
+- veya ortam değişkeni:
+  - Windows: `set GDRIVE_FOLDER_ID=...`
+  - PowerShell: `$env:GDRIVE_FOLDER_ID="..."`
+
+---
+
+## Çalıştırma
+
+### GUI ile (önerilen)
 ```bash
 python big_ambitions_drive_sync.py
 ```
 
-#### Without GUI
+- Ayarları doldurup **Başlat** deyin.
+- Uygulama artık **kendini kapatmaz/gizlemez**, pencere açık kalır.
+- İzleme arka planda thread içinde devam eder.
+
+### GUI olmadan
 ```bash
 python big_ambitions_drive_sync.py --no-gui
 ```
 
-#### Pre-check only
+### Sadece ön kontrol
 ```bash
 python big_ambitions_drive_sync.py --doctor --no-gui
 ```
 
-### Required file
-- `service_account_credentials.json` (default: same folder as script)
-- or set a custom path using `SERVICE_ACCOUNT_FILE` environment variable.
+---
 
-### How to create the Service Account JSON (basic Google Cloud setup)
-
-This project does not open an interactive OAuth login popup. It requires a **Service Account JSON key**.
-
-1. Open **Google Cloud Console**: https://console.cloud.google.com/
-2. Select a project (or create a new one).
-3. Go to **APIs & Services > Library**, search for **Google Drive API**, and click **Enable**.
-4. Go to **APIs & Services > Credentials**.
-5. Click **Create Credentials > Service account**.
-6. Give it a name (for example, `big-ambitions-sync`) and create it.
-7. Open the created service account, then in **Keys** tab:
-   - **Add Key > Create new key > JSON**
-   - Download the JSON key file.
-8. Put the downloaded file into this project folder and name it:
-   - `service_account_credentials.json`
-   - (or set `SERVICE_ACCOUNT_FILE` to a custom path).
-
-#### Grant Drive access to the service account
-A service account is a robot identity. It still needs permission to write into your Drive folder:
-
-- Open the target folder in Google Drive.
-- Click **Share** and add the service account email
-  (`client_email` inside the JSON file).
-- Grant at least **Editor** role.
-
-> Without this sharing step, API auth may succeed but uploads to your target folder can fail.
-
-### Notes
-- Watcher starts when the game process is running and stops when it closes.
-- You can start/stop the program at any time; reports are built from existing CSV files only.
-- Expense types are detected dynamically from data; no hardcoding required.
-## Big Ambitions Drive Sync
-
-Tak-çalıştır'a en yakın kurulum için:
-
-1. Bu klasöre `service_account_credentials.json` koy.
-2. Paketleri kur:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Kontrol çalıştır:
-   ```bash
-   python big_ambitions_drive_sync.py --doctor --no-gui
-   ```
-4. GUI ile ayar girip başlat:
-   ```bash
-   python big_ambitions_drive_sync.py
-   ```
-
-Script açıldığında kullanıcı; Service Account JSON, Drive Folder ID, process isimleri
-ve bekleme sürelerini GUI üzerinden girer. "Başlat" dedikten sonra otomatik izleme başlar.
-
-5. (Opsiyonel) GUI olmadan environment/default ayarlarla başlat:
-   ```bash
-   python big_ambitions_drive_sync.py --no-gui
-   ```
-
-### Opsiyonel ayarlar
-- `GDRIVE_FOLDER_ID`: Yüklenecek Drive klasörü
-- `SERVICE_ACCOUNT_FILE`: Credential dosya yolu
-- `GAME_PROCESS_NAMES`: Virgülle ayrılmış exe isimleri
+## Ortam değişkenleri
+- `SERVICE_ACCOUNT_FILE`: JSON dosya yolu.
+- `GDRIVE_FOLDER_ID`: Yükleme yapılacak Drive klasör ID’si (önerilen/zorunlu kullanım).
+- `GAME_PROCESS_NAMES`: Virgülle ayrılmış process adları.
 
 Örnek:
 ```bash
-set GDRIVE_FOLDER_ID=1abcDEF...
-python big_ambitions_drive_sync.py
+set SERVICE_ACCOUNT_FILE=C:\keys\service_account_credentials.json
+set GDRIVE_FOLDER_ID=1AbCdEfGh...
+set GAME_PROCESS_NAMES=BigAmbitions.exe,UnityPlayer.exe
+python big_ambitions_drive_sync.py --no-gui
 ```
+
+---
+
+## Sık hata ve çözüm
+
+### `HttpError 403 storageQuotaExceeded`
+Sebep: Service Account ile My Drive root'a yazma denemesi.
+
+Çözüm:
+1. Drive’da bir klasör oluştur.
+2. Service account e-postasına o klasörü paylaş (Editor).
+3. Klasör ID’sini `GDRIVE_FOLDER_ID` olarak ver.
+
+### `Geçici dosya silinemedi (WinError 32)`
+Windows'ta dosya başka process tarafından kısa süreli kilitli olabilir. Script yeniden dener; çoğu durumda kritik değildir.
+
+---
+
+## Notlar
+- Script Windows path yapısına göre yazılmıştır.
+- Oyun süreci kapanınca izleme durur, açılınca tekrar başlar.
+- Aynı dosya değişimi için duplicate event filtreleme yapılır.
