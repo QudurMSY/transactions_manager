@@ -95,7 +95,7 @@ python big_ambitions_drive_sync.py --doctor --no-gui
 ```bash
 set SERVICE_ACCOUNT_FILE=C:\keys\service_account_credentials.json
 set GDRIVE_FOLDER_ID=1AbCdEfGh...
-set GAME_PROCESS_NAMES=BigAmbitions.exe,UnityPlayer.exe
+set GAME_PROCESS_NAMES=Big Ambitions.exe,Big_Ambitions.exe,BigAmbitions.exe,UnityPlayer.exe
 python big_ambitions_drive_sync.py --no-gui
 ```
 
@@ -110,13 +110,21 @@ python big_ambitions_drive_sync.py --no-gui
 - `[WARN]`: Geçici/iyileştirilebilir durum (dosya kilidi, klasör bulunamaması, gün değeri okunamaması vb.).
 - `[ERROR]`: İşlem hatası (Drive API veya beklenmeyen runtime hatası).
 
-### `HttpError 403 storageQuotaExceeded`
-Sebep: Service Account ile My Drive root'a yazma denemesi.
+### `[ERROR] ... Drive 403 storageQuotaExceeded: Service Account kişisel My Drive alanına yazamaz`
+Sebep: Service Account hesabının kişisel **My Drive** depolama alanı yoktur. `GDRIVE_FOLDER_ID` boş/geçersiz olduğunda upload root'a gitmeye çalışır ve 403 alırsınız.
 
-Çözüm:
-1. Drive’da bir klasör oluştur.
-2. Service account e-postasına o klasörü paylaş (Editor).
-3. Klasör ID’sini `GDRIVE_FOLDER_ID` olarak ver.
+Çözüm (adım adım):
+1. Google Drive'da hedef klasörü açın/oluşturun.
+2. `service_account_credentials.json` içindeki `client_email` adresini bu klasöre **Editor** olarak ekleyin.
+3. Klasör URL'sinden yalnızca ID'yi kopyalayın:
+   - `https://drive.google.com/drive/folders/<BURASI_FOLDER_ID>`
+4. Bu ID'yi uygulamaya verin:
+   - GUI: **Drive Folder ID**
+   - veya ortam değişkeni: `GDRIVE_FOLDER_ID=<BURASI_FOLDER_ID>`
+5. Doğrulama için çalıştırın:
+   - `python big_ambitions_drive_sync.py --doctor --no-gui`
+
+İpucu: `.`, `root`, kısa/eksik ID ya da klasör adı (ID yerine) kullanmayın.
 
 ### `Geçici dosya silinemedi (WinError 32)`
 Windows'ta dosya başka process tarafından kısa süreli kilitli olabilir. Script yeniden dener; çoğu durumda kritik değildir.

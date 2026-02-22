@@ -20,7 +20,7 @@ Bu script şunları yapar:
 Opsiyonel environment variable'lar:
 - SERVICE_ACCOUNT_FILE
 - GDRIVE_FOLDER_ID
-- GAME_PROCESS_NAMES (varsayılan: BigAmbitions.exe,UnityPlayer.exe)
+- GAME_PROCESS_NAMES (varsayılan: Big Ambitions.exe,Big_Ambitions.exe,BigAmbitions.exe,UnityPlayer.exe)
 """
 
 from __future__ import annotations
@@ -293,7 +293,7 @@ def build_default_config() -> Config:
         os.getenv("SERVICE_ACCOUNT_FILE", str(script_dir / "service_account_credentials.json"))
     )
     folder_id = normalize_drive_folder_id(os.getenv("GDRIVE_FOLDER_ID"))
-    names = os.getenv("GAME_PROCESS_NAMES", "BigAmbitions.exe,UnityPlayer.exe")
+    names = os.getenv("GAME_PROCESS_NAMES", "Big Ambitions.exe,Big_Ambitions.exe,BigAmbitions.exe,UnityPlayer.exe")
     process_names = tuple(n.strip() for n in names.split(",") if n.strip())
 
     return Config(
