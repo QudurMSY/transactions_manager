@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import errno
+import json
 import os
 import threading
 import time
@@ -83,10 +84,54 @@ class DriveUploader:
 
     def __init__(self, service_account_file: Path, folder_id: Optional[str] = None) -> None:
         self.folder_id = folder_id
+        self.service_account_file = service_account_file
         credentials = service_account.Credentials.from_service_account_file(
             str(service_account_file), scopes=SCOPES
         )
         self.service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+    def get_service_account_email(self) -> Optional[str]:
+        try:
+            payload = json.loads(self.service_account_file.read_text(encoding="utf-8"))
+            email = (payload.get("client_email") or "").strip()
+            return email or None
+        except Exception:
+            return None
+
+    def describe_target_folder(self) -> str:
+        if not self.folder_id:
+            return "Drive hedef klasör ID verilmedi (GDRIVE_FOLDER_ID boş)."
+
+        try:
+            meta = (
+                self.service.files()
+                .get(
+                    fileId=self.folder_id,
+                    fields="id,name,driveId,capabilities(canAddChildren)",
+                    supportsAllDrives=True,
+                )
+                .execute()
+            )
+        except HttpError as exc:
+            raise RuntimeError(explain_http_error(exc, self.folder_id, self.get_service_account_email())) from exc
+
+        folder_name = meta.get("name", "(isimsiz)")
+        drive_id = meta.get("driveId")
+        can_add_children = meta.get("capabilities", {}).get("canAddChildren")
+        if can_add_children is False:
+            raise RuntimeError(
+                "Drive klasörüne yazma yetkisi yok. Service Account'u (veya bağlı grubu) klasöre en az Editor yetkisiyle ekleyin."
+            )
+
+        if not drive_id:
+            raise RuntimeError(
+                "Seçilen klasör bir Shared Drive içinde değil (My Drive klasörü görünüyor). "
+                "Service Account bu durumda yeni dosya oluştururken storageQuotaExceeded alır. "
+                "Çözüm: bir Shared Drive içinde klasör açın, bu klasör ID'sini GDRIVE_FOLDER_ID olarak verin "
+                "ve Service Account e-postasını Shared Drive'a Content manager/Manager olarak ekleyin."
+            )
+
+        return f"Doğrulandı: '{folder_name}' (driveId={drive_id})"
 
     @property
     def _list_kwargs(self) -> dict[str, object]:
@@ -184,7 +229,10 @@ class TransactionsHandler(FileSystemEventHandler):
             self._last_uploaded_day = day_value
             self._last_uploaded_mtime = file_mtime
         except HttpError as exc:
-            print(f"[ERROR] transactions.csv işleme hatası: {explain_http_error(exc)}")
+            print(
+                "[ERROR] transactions.csv işleme hatası: "
+                f"{explain_http_error(exc, self.uploader.folder_id, self.uploader.get_service_account_email())}"
+            )
         except Exception as exc:
             print(f"[ERROR] transactions.csv işleme hatası: {exc}")
 
@@ -304,7 +352,11 @@ def preflight(config: Config) -> list[str]:
     return errors
 
 
-def explain_http_error(exc: HttpError) -> str:
+def explain_http_error(
+    exc: HttpError,
+    folder_id: Optional[str] = None,
+    service_account_email: Optional[str] = None,
+) -> str:
     body = getattr(exc, "content", b"")
     try:
         text = body.decode("utf-8", errors="replace")
@@ -312,10 +364,14 @@ def explain_http_error(exc: HttpError) -> str:
         text = str(body)
 
     if exc.resp is not None and exc.resp.status == 403 and "storageQuotaExceeded" in text:
+        folder_hint = folder_id if folder_id else "<boş>"
+        sa_hint = service_account_email if service_account_email else "(json içinden okunamadı)"
         return (
-            "Drive 403 storageQuotaExceeded: Service Account kişisel My Drive alanına"
-            " yazamaz. GDRIVE_FOLDER_ID ile paylaşımlı sürücü/klasör ID'si verin"
-            " ve bu klasörü Service Account e-postasıyla paylaşın."
+            "Drive 403 storageQuotaExceeded: Service Account My Drive kotası olmadığı için "
+            "kişisel My Drive altına dosya oluşturamaz. Genellikle hedef klasör bir kullanıcının My Drive'ındadır. "
+            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}. "
+            "Çözüm: Shared Drive içinde bir klasör oluşturun, onun ID'sini verin ve Service Account'u "
+            f"('{sa_hint}') Shared Drive'a Content manager/Manager olarak ekleyin."
         )
 
     if exc.resp is not None and exc.resp.status == 404 and '"location": "fileId"' in text:
@@ -336,6 +392,12 @@ def run_loop(config: Config) -> None:
 
     target_info = config.drive_folder_id if config.drive_folder_id else "<yok>"
     print(f"[INFO] Drive hedef klasör ID: {target_info}")
+    try:
+        print(f"[INFO] Drive hedef kontrolü: {uploader.describe_target_folder()}")
+    except Exception as exc:
+        print(f"[ERROR] Drive hedef doğrulama hatası: {exc}")
+        raise SystemExit(1)
+
     print("[INFO] Otomasyon başladı. Oyun süreci izleniyor...")
     while True:
         try:
@@ -377,7 +439,10 @@ def run_loop(config: Config) -> None:
             print("[INFO] Çıkış sinyali alındı.")
             break
         except HttpError as exc:
-            print(f"[ERROR] Ana döngü hatası: {explain_http_error(exc)}")
+            print(
+                "[ERROR] Ana döngü hatası: "
+                f"{explain_http_error(exc, config.drive_folder_id, uploader.get_service_account_email())}"
+            )
             time.sleep(config.poll_seconds)
         except Exception as exc:
             print(f"[ERROR] Ana döngü hatası: {exc}")

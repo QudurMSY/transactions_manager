@@ -45,13 +45,14 @@ Bu uygulama **OAuth popup** açmaz; bunun yerine **Service Account JSON** kullan
    - veya farklı bir yol için `SERVICE_ACCOUNT_FILE` kullan.
 
 ### 5) Drive klasörü oluştur ve paylaş
-> Önemli: Service Account'un kişisel “My Drive” kotası yoktur. Bu yüzden bir hedef klasör ID'si girmeniz gerekir.
+> Önemli: Service Account'un kişisel “My Drive” kotası yoktur. **Hedef klasörün Shared Drive içinde olması gerekir**; kullanıcıların kişisel My Drive klasörleri genelde `storageQuotaExceeded` üretir.
 
 1. Google Drive'da bir klasör aç/oluştur (ör. `BigAmbitionsSync`).
-2. **Share / Paylaş** deyip service account e-postasını ekle:
+2. **Shared Drive** içinde klasör aç (önerilen) veya mevcut Shared Drive klasörü seç.
+3. Service account e-postasını ekle:
    - JSON içindeki `client_email` alanı.
-3. Yetkiyi en az **Editor** ver.
-4. Klasör URL’sinden klasör ID’yi al:
+4. Yetkiyi en az **Content manager** (veya Manager) ver.
+5. Klasör URL’sinden klasör ID’yi al:
    - `https://drive.google.com/drive/folders/<BURASI_FOLDER_ID>`
 
 ### 6) Uygulamaya Folder ID ver
@@ -103,6 +104,20 @@ python big_ambitions_drive_sync.py --no-gui
 
 ## Sık hata ve çözüm
 
+
+### Olası hata senaryoları (hızlı checklist)
+1. `GDRIVE_FOLDER_ID` boş/yanlış (`.`, `root`, kısa değer, klasör adı girme)
+2. Verilen ID erişilebilir değil (404 notFound)
+3. Klasör kişisel My Drive'da (403 storageQuotaExceeded)
+4. Service account e-postası klasöre/Shared Drive'a eklenmemiş
+5. Yetki yetersiz (viewer/commenter ise upload yapılamaz)
+6. Drive API projede kapalı
+7. Yanlış service account JSON dosyası kullanılıyor
+8. `transactions.csv` oyun tarafından kilitli (WinError 32 / EACCES)
+9. CSV formatı bozuk, gün sütunu (B) okunamıyor
+10. Oyun process adı farklı olduğu için izleme başlamıyor
+
+
 ### Log seviyeleri ne anlama geliyor?
 - `[INFO]`: Normal durum bilgisi (izleme başlatıldı/durduruldu, duplicate event atlandı vb.).
 - `[WATCHDOG]`: Dosya sistemi değişimi algılandı (`transactions.csv` update event'i geldi).
@@ -110,20 +125,18 @@ python big_ambitions_drive_sync.py --no-gui
 - `[WARN]`: Geçici/iyileştirilebilir durum (dosya kilidi, klasör bulunamaması, gün değeri okunamaması vb.).
 - `[ERROR]`: İşlem hatası (Drive API veya beklenmeyen runtime hatası).
 
-### `[ERROR] ... Drive 403 storageQuotaExceeded: Service Account kişisel My Drive alanına yazamaz`
-Sebep: Service Account hesabının kişisel **My Drive** depolama alanı yoktur. `GDRIVE_FOLDER_ID` boş/geçersiz olduğunda upload root'a gitmeye çalışır ve 403 alırsınız.
+### `[ERROR] ... Drive 403 storageQuotaExceeded`
+Sebep: Service Account hesabının kişisel **My Drive** depolama alanı yoktur. Hedef klasör kişisel My Drive altındaysa (ID doğru olsa bile) dosya oluşturma sırasında 403 gelebilir.
 
 Çözüm (adım adım):
-1. Google Drive'da hedef klasörü açın/oluşturun.
-2. `service_account_credentials.json` içindeki `client_email` adresini bu klasöre **Editor** olarak ekleyin.
+1. Google Drive'da bir **Shared Drive** içinde hedef klasör açın.
+2. `service_account_credentials.json` içindeki `client_email` adresini Shared Drive'a **Content manager** veya **Manager** olarak ekleyin.
 3. Klasör URL'sinden yalnızca ID'yi kopyalayın:
    - `https://drive.google.com/drive/folders/<BURASI_FOLDER_ID>`
 4. Bu ID'yi uygulamaya verin:
    - GUI: **Drive Folder ID**
    - veya ortam değişkeni: `GDRIVE_FOLDER_ID=<BURASI_FOLDER_ID>`
-   - uygulama açılışında logda `Drive hedef klasör ID: ...` satırını kontrol edin (`<yok>` görünüyorsa ID gelmemiştir).
-5. Doğrulama için çalıştırın:
-   - `python big_ambitions_drive_sync.py --doctor --no-gui`
+5. Uygulama başlangıcında çıkan `Drive hedef kontrolü: Doğrulandı ...` satırını kontrol edin.
 
 İpucu: `.`, `root`, kısa/eksik ID ya da klasör adı (ID yerine) kullanmayın.
 Windows'ta `set GDRIVE_FOLDER_ID=...` sadece açtığınız mevcut CMD oturumunda geçerlidir; scripti başka yerden (ör. çift tık) başlatırsanız değişken taşınmayabilir.
