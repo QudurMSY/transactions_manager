@@ -174,6 +174,77 @@ python big_ambitions_drive_sync.py --no-gui
 1. Google Drive depolama kullanımınızı kontrol edin.
 2. Yer açın veya farklı hesapla deneyin.
 
+diff --git a/README.md b/README.md
+index fbf73882b5ec5ad828b450a94993c5da492b8a27..ed8f89e1072bdcab8cb098a6cbca56d309b020fc 100644
+--- a/README.md
++++ b/README.md
+@@ -152,50 +152,65 @@ python big_ambitions_drive_sync.py --no-gui
+ 
+ ### Hata: `Google credentials dosyası yok`
+ **Sebep:** JSON yolu yanlış veya dosya yok.
+ 
+ **Çözüm:**
+ 1. JSON dosyasının gerçekten var olduğunu kontrol edin.
+ 2. `GOOGLE_CREDENTIALS_FILE` yolunu doğru girin.
+ 3. Dosya adı `oauth_client_credentials.json` ise proje klasöründe olduğundan emin olun.
+ 
+ ### Hata: `HTTP 404 fileId notFound`
+ **Sebep:** `GDRIVE_FOLDER_ID` yanlış, eksik, farklı hesaba ait veya erişiminiz yok.
+ 
+ **Çözüm:**
+ 1. Klasörü Drive’da açın.
+ 2. URL’den sadece `/folders/` sonrası ID’yi alın.
+ 3. Doğru Google hesabıyla giriş yaptığınızdan emin olun.
+ 4. Folder ID alanına klasör adını değil ID’yi yazın.
+ 
+ ### Hata: `HTTP 403 storageQuotaExceeded`
+ **Sebep:** Drive kotası dolu olabilir.
+ 
+ **Çözüm:**
+ 1. Google Drive depolama kullanımınızı kontrol edin.
+ 2. Yer açın veya farklı hesapla deneyin.
+ 
++### Hata: `Erişim engellendi ... Hata 403: access_denied`
++**Sebep:** OAuth consent screen büyük olasılıkla **Testing** modunda ve giriş yapan hesap test kullanıcısı listesinde değil.
++
++**Çözüm (adım adım kontrol listesi):**
++1. Google Cloud Console'da doğru projeyi açın.
++2. **APIs & Services > OAuth consent screen** sayfasına gidin.
++3. App status `Testing` ise, **Test users** bölümüne giriş yapacak Gmail adresini ekleyin.
++4. Scripti çalıştırırken aynı Gmail hesabıyla oturum açtığınızdan emin olun (gerekirse gizli sekmede tekrar deneyin).
++5. Eski oturum/izin çakışmalarını temizlemek için `token.json` dosyasını silip tekrar giriş yapın.
++6. Uygulamayı geniş kitleye açacaksanız OAuth doğrulamasını tamamlayıp app status'u `In production` yapın.
++
++**Geliştirici notu:**
++- `Desktop app` OAuth istemcisinde redirect URI elle girilmez; Google istemciyi yerelde otomatik yönetir.
++- Farklı Google hesapları arasında en sık sorun, tarayıcıda yanlış hesabın aktif olmasıdır.
++
+ ### Hata: Tarayıcı açılmıyor / OAuth tamamlanmıyor
+ **Çözüm:**
+ 1. Scripti normal kullanıcı haklarıyla tekrar başlatın.
+ 2. Güvenlik duvarı/local browser kısıtlarını kontrol edin.
+ 3. Gerekirse farklı varsayılan tarayıcı ile tekrar deneyin.
+ 
+ ### Hata: `WinError 32`
+ **Sebep:** Oyun dosyayı o anda yazıyor (dosya kilidi).
+ 
+ **Çözüm:**
+ - Geçici bir durumdur; script zaten otomatik retry yapar.
+ 
+ ---
+ 
+ ## 8) Temiz başlangıç (reset) nasıl yapılır?
+ OAuth’u baştan kurmak isterseniz:
+ 1. `token.json` dosyasını silin.
+ 2. Scripti tekrar başlatın.
+ 3. Tarayıcıdan hesabı yeniden seçip izin verin.
+ 
+ ---
+ 
+ ## Notlar
+ - Script Windows path yapısına göre yazılmıştır.
+ - Oyun kapanınca izleme durur, açılınca tekrar başlar.
+
 ### Hata: Tarayıcı açılmıyor / OAuth tamamlanmıyor
 **Çözüm:**
 1. Scripti normal kullanıcı haklarıyla tekrar başlatın.
