@@ -31,12 +31,13 @@ import csv
 import errno
 import json
 import os
+import queue
 import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from tkinter import filedialog, messagebox
 
 import psutil
@@ -220,9 +221,15 @@ class DriveUploader:
 class TransactionsHandler(FileSystemEventHandler):
     """Sadece transactions.csv modified event'ini işler."""
 
-    def __init__(self, uploader: DriveUploader, settle_seconds: int = 10) -> None:
+    def __init__(
+        self,
+        uploader: DriveUploader,
+        settle_seconds: int = 10,
+        logger: Callable[[str], None] = print,
+    ) -> None:
         self.uploader = uploader
         self.settle_seconds = settle_seconds
+        self.logger = logger
         self._last_uploaded_day: Optional[str] = None
         self._last_uploaded_mtime: Optional[float] = None
 
@@ -235,33 +242,33 @@ class TransactionsHandler(FileSystemEventHandler):
             return
 
         try:
-            print(f"[WATCHDOG] Değişim algılandı: {changed_file}")
+            self.logger(f"[WATCHDOG] Değişim algılandı: {changed_file}")
             time.sleep(self.settle_seconds)
 
             # Aynı mtime için duplicate event'leri atla.
             file_mtime = changed_file.stat().st_mtime
             day_value = self._extract_day_from_csv(changed_file)
             if day_value is None:
-                print("[WARN] B sütunu (gün) okunamadı, upload atlandı.")
+                self.logger("[WARN] B sütunu (gün) okunamadı, upload atlandı.")
                 return
 
             if self._last_uploaded_day == day_value and self._last_uploaded_mtime == file_mtime:
-                print("[INFO] Duplicate event atlandı.")
+                self.logger("[INFO] Duplicate event atlandı.")
                 return
 
             drive_name = f"transactionsgun_{day_value}.csv"
             csv_bytes = self._read_csv_bytes_with_retry(changed_file)
             result = self.uploader.upload_or_update(csv_bytes, drive_name)
-            print(f"[DRIVE] {result}")
+            self.logger(f"[DRIVE] {result}")
             self._last_uploaded_day = day_value
             self._last_uploaded_mtime = file_mtime
         except HttpError as exc:
-            print(
+            self.logger(
                 "[ERROR] transactions.csv işleme hatası: "
                 f"{explain_http_error(exc, self.uploader.folder_id)}"
             )
         except Exception as exc:
-            print(f"[ERROR] transactions.csv işleme hatası: {exc}")
+            self.logger(f"[ERROR] transactions.csv işleme hatası: {exc}")
 
     @staticmethod
     def _extract_day_from_csv(csv_file: Path) -> Optional[str]:
@@ -406,51 +413,51 @@ def explain_http_error(
     return f"HTTP {getattr(exc.resp, 'status', 'unknown')}: {text}"
 
 
-def run_loop(config: Config) -> None:
+def run_loop(config: Config, logger: Callable[[str], None] = print) -> None:
     uploader = DriveUploader(config.credentials_file, config.drive_folder_id)
 
     observer: Optional[Observer] = None
     watched_folder: Optional[Path] = None
 
     target_info = config.drive_folder_id if config.drive_folder_id else "<yok>"
-    print(f"[INFO] Drive hedef klasör ID: {target_info}")
+    logger(f"[INFO] Drive hedef klasör ID: {target_info}")
     try:
-        print(f"[INFO] Drive hedef kontrolü: {uploader.describe_target_folder()}")
+        logger(f"[INFO] Drive hedef kontrolü: {uploader.describe_target_folder()}")
     except Exception as exc:
-        print(f"[ERROR] Drive hedef doğrulama hatası: {exc}")
+        logger(f"[ERROR] Drive hedef doğrulama hatası: {exc}")
         raise SystemExit(1)
 
-    print("[INFO] Otomasyon başladı. Oyun süreci izleniyor...")
+    logger("[INFO] Otomasyon başladı. Oyun süreci izleniyor...")
     while True:
         try:
             running = is_game_running(config.process_names)
             if running:
                 latest_folder = find_latest_save_folder(config.savegames_root)
                 if latest_folder is None:
-                    print("[WARN] En güncel save klasörü bulunamadı.")
+                    logger("[WARN] En güncel save klasörü bulunamadı.")
                 else:
                     transactions = latest_folder / "transactions.csv"
                     if not transactions.exists():
-                        print(f"[WARN] transactions.csv yok: {transactions}")
+                        logger(f"[WARN] transactions.csv yok: {transactions}")
                     elif observer is None:
-                        handler = TransactionsHandler(uploader, config.file_settle_seconds)
+                        handler = TransactionsHandler(uploader, config.file_settle_seconds, logger)
                         observer = Observer()
                         observer.schedule(handler, str(latest_folder), recursive=False)
                         observer.start()
                         watched_folder = latest_folder
-                        print(f"[INFO] İzleme başladı: {latest_folder}")
+                        logger(f"[INFO] İzleme başladı: {latest_folder}")
                     elif watched_folder != latest_folder:
                         observer.stop()
                         observer.join(timeout=5)
-                        handler = TransactionsHandler(uploader, config.file_settle_seconds)
+                        handler = TransactionsHandler(uploader, config.file_settle_seconds, logger)
                         observer = Observer()
                         observer.schedule(handler, str(latest_folder), recursive=False)
                         observer.start()
                         watched_folder = latest_folder
-                        print(f"[INFO] İzlenen klasör güncellendi: {latest_folder}")
+                        logger(f"[INFO] İzlenen klasör güncellendi: {latest_folder}")
             else:
                 if observer is not None:
-                    print("[INFO] Oyun kapalı, izleme durduruldu.")
+                    logger("[INFO] Oyun kapalı, izleme durduruldu.")
                     observer.stop()
                     observer.join(timeout=5)
                     observer = None
@@ -458,16 +465,16 @@ def run_loop(config: Config) -> None:
 
             time.sleep(config.poll_seconds)
         except KeyboardInterrupt:
-            print("[INFO] Çıkış sinyali alındı.")
+            logger("[INFO] Çıkış sinyali alındı.")
             break
         except HttpError as exc:
-            print(
+            logger(
                 "[ERROR] Ana döngü hatası: "
                 f"{explain_http_error(exc, config.drive_folder_id)}"
             )
             time.sleep(config.poll_seconds)
         except Exception as exc:
-            print(f"[ERROR] Ana döngü hatası: {exc}")
+            logger(f"[ERROR] Ana döngü hatası: {exc}")
             time.sleep(config.poll_seconds)
 
     if observer is not None:
@@ -505,6 +512,37 @@ def launch_config_gui(default_config: Config) -> None:
     status_var = tk.StringVar(value="Durum: Hazır")
 
     runner_thread: Optional[threading.Thread] = None
+
+    log_queue: queue.Queue[str] = queue.Queue()
+
+    def gui_logger(message: str) -> None:
+        print(message)
+        log_queue.put(message)
+
+    def pump_logs() -> None:
+        updated = False
+        while True:
+            try:
+                message = log_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            updated = True
+            if message.startswith("[ERROR]"):
+                status_var.set(f"Durum: Hata - {message}")
+            elif message.startswith("[WARN]"):
+                status_var.set(f"Durum: Uyarı - {message}")
+            else:
+                status_var.set(f"Durum: {message}")
+
+            log_text.configure(state="normal")
+            log_text.insert("end", message + "\n")
+            log_text.see("end")
+            log_text.configure(state="disabled")
+
+        if updated:
+            root.update_idletasks()
+        root.after(250, pump_logs)
 
     def browse_savegames() -> None:
         selected = filedialog.askdirectory(title="SaveGames klasörünü seç")
@@ -548,7 +586,7 @@ def launch_config_gui(default_config: Config) -> None:
                 messagebox.showinfo("Bilgi", "İzleme zaten çalışıyor.")
                 return
 
-            runner_thread = threading.Thread(target=run_loop, args=(cfg,), daemon=True)
+            runner_thread = threading.Thread(target=run_loop, args=(cfg, gui_logger), daemon=True)
             runner_thread.start()
             status_var.set("Durum: İzleme başladı (pencere açık kalır)")
             start_button.config(state="disabled")
@@ -593,6 +631,12 @@ def launch_config_gui(default_config: Config) -> None:
         row=row, column=0, columnspan=3, sticky="w", padx=8, pady=6
     )
 
+
+    row += 1
+    tk.Label(root, text="Canlı log").grid(row=row, column=0, sticky="nw", padx=8, pady=6)
+    log_text = tk.Text(root, width=82, height=10, state="disabled")
+    log_text.grid(row=row, column=1, columnspan=2, padx=8, pady=6, sticky="w")
+
     row += 1
     start_button = tk.Button(root, text="Başlat", command=on_start, width=18)
     start_button.grid(row=row, column=1, sticky="w", padx=8, pady=12)
@@ -600,6 +644,7 @@ def launch_config_gui(default_config: Config) -> None:
         row=row, column=1, sticky="e", padx=8, pady=12
     )
 
+    root.after(250, pump_logs)
     root.protocol("WM_DELETE_WINDOW", on_cancel)
     root.mainloop()
 

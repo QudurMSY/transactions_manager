@@ -108,6 +108,7 @@ GUI’de doldurmanız gerekenler:
 - **OAuth Credentials JSON**
 - **Drive Folder ID** (opsiyonel)
 - Process adları (gerekirse)
+- Alt bölümdeki **Canlı log** kutusunda `[INFO]/[WARN]/[ERROR]` mesajlarını anlık görebilirsiniz.
 
 ### 5.2 GUI olmadan
 ```bash
