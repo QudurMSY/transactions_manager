@@ -4,8 +4,8 @@ Yeni davranış:
 - Drive üzerinde `big ambitions` adlı kök klasörü garanti edilir.
 - Gün değerine göre 60 günlük dönem klasörleri (1-60, 61-120, ...) oluşturulur.
 - transactions.csv değiştiğinde ilgili dönem klasörüne transactionsgun_<gun>.csv yüklenir.
-- Her dönem klasöründe `main.xlsx` üretilir (Excel SUMIF formülleri ile tip bazlı toplam).
-- Kök klasörde `main_total.xlsx` üretilir (tüm dönemlerin toplamı, yine Excel formülleri).
+- Her dönem klasöründe `main` adlı Google Sheet üretilir (görünür grafiklerle).
+- Kök klasörde `main_total` adlı Google Sheet üretilir (görünür grafiklerle).
 Bu script şunları yapar:
 1) Big Ambitions süreci açık mı kontrol eder.
 2) SaveGames altında en güncel sürüm + en güncel save klasörünü dinamik bulur.
@@ -57,7 +57,10 @@ from watchdog.observers import Observer
 # NOTE:
 # Bu uygulama hedef klasörü doğruladığı ve create/update yaptığı için
 # tam Drive scope'u (`drive`) kullanır.
-SCOPES = ["https://www.googleapis.com/auth/drive"]
+SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets",
+]
 
 
 @dataclass
@@ -105,6 +108,7 @@ class DriveUploader:
         self.credentials_file = credentials_file
         credentials = self._load_credentials(credentials_file)
         self.service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+        self.sheets_service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
     @staticmethod
     def _read_json(path: Path) -> dict:
@@ -252,6 +256,189 @@ class DriveUploader:
     def upload_or_update(self, csv_bytes: bytes, drive_name: str) -> str:
         return self.upload_or_update_in_parent(csv_bytes, drive_name, "text/csv", self.folder_id)
 
+    def replace_google_sheet_with_charts(
+        self,
+        file_name: str,
+        parent_id: Optional[str],
+        data_sheets: dict[str, dict[str, list[list[object]]]],
+        charts: list[dict[str, object]],
+    ) -> str:
+        existing_id = self._find_existing_file_id_in_parent(file_name, parent_id)
+        if existing_id:
+            self.service.files().delete(fileId=existing_id, supportsAllDrives=True).execute()
+
+        spreadsheet = self.sheets_service.spreadsheets().create(
+            body={
+                "properties": {"title": file_name},
+                "sheets": [{"properties": {"title": name}} for name in data_sheets],
+            },
+            fields="spreadsheetId",
+        ).execute()
+        spreadsheet_id = spreadsheet["spreadsheetId"]
+
+        if parent_id:
+            file_meta = self.service.files().get(
+                fileId=spreadsheet_id,
+                fields="parents",
+                supportsAllDrives=True,
+            ).execute()
+            current_parents = ",".join(file_meta.get("parents", []))
+            self.service.files().update(
+                fileId=spreadsheet_id,
+                addParents=parent_id,
+                removeParents=current_parents,
+                fields="id",
+                supportsAllDrives=True,
+            ).execute()
+
+        values_data = []
+        for name, sheet_payload in data_sheets.items():
+            values = [sheet_payload["headers"], *sheet_payload["rows"]]
+            values_data.append({"range": f"'{name}'!A1", "values": values})
+
+        self.sheets_service.spreadsheets().values().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "valueInputOption": "RAW",
+                "data": values_data,
+            },
+        ).execute()
+
+        sheet_meta = self.sheets_service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title))",
+        ).execute()
+        sheet_id_map = {
+            item["properties"]["title"]: item["properties"]["sheetId"]
+            for item in sheet_meta.get("sheets", [])
+        }
+
+        requests = []
+        for idx, chart in enumerate(charts):
+            chart_sheet = str(chart["sheet"])
+            sheet_id = sheet_id_map[chart_sheet]
+            rows = data_sheets[chart_sheet]["rows"]
+            row_count = max(len(rows), 1)
+            categories_col = int(chart["cats_col"]) - 1
+
+            if chart["type"] in {"bar", "line"}:
+                chart_type = "COLUMN" if chart["type"] == "bar" else "LINE"
+                basic_series = []
+                for val_col, _name in chart["series"]:
+                    basic_series.append(
+                        {
+                            "series": {
+                                "sourceRange": {
+                                    "sources": [
+                                        {
+                                            "sheetId": sheet_id,
+                                            "startRowIndex": 1,
+                                            "endRowIndex": row_count + 1,
+                                            "startColumnIndex": int(val_col) - 1,
+                                            "endColumnIndex": int(val_col),
+                                        }
+                                    ]
+                                }
+                            },
+                            "targetAxis": "LEFT_AXIS",
+                        }
+                    )
+
+                spec = {
+                    "title": str(chart["title"]),
+                    "basicChart": {
+                        "chartType": chart_type,
+                        "legendPosition": "RIGHT_LEGEND",
+                        "axis": [
+                            {"position": "BOTTOM_AXIS", "title": data_sheets[chart_sheet]["headers"][categories_col]},
+                            {"position": "LEFT_AXIS", "title": "Tutar"},
+                        ],
+                        "domains": [
+                            {
+                                "domain": {
+                                    "sourceRange": {
+                                        "sources": [
+                                            {
+                                                "sheetId": sheet_id,
+                                                "startRowIndex": 1,
+                                                "endRowIndex": row_count + 1,
+                                                "startColumnIndex": categories_col,
+                                                "endColumnIndex": categories_col + 1,
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        ],
+                        "series": basic_series,
+                        "headerCount": 1,
+                    },
+                }
+            else:
+                val_col, _name = chart["series"][0]
+                spec = {
+                    "title": str(chart["title"]),
+                    "pieChart": {
+                        "legendPosition": "RIGHT_LEGEND",
+                        "domain": {
+                            "sourceRange": {
+                                "sources": [
+                                    {
+                                        "sheetId": sheet_id,
+                                        "startRowIndex": 1,
+                                        "endRowIndex": row_count + 1,
+                                        "startColumnIndex": categories_col,
+                                        "endColumnIndex": categories_col + 1,
+                                    }
+                                ]
+                            }
+                        },
+                        "series": {
+                            "sourceRange": {
+                                "sources": [
+                                    {
+                                        "sheetId": sheet_id,
+                                        "startRowIndex": 1,
+                                        "endRowIndex": row_count + 1,
+                                        "startColumnIndex": int(val_col) - 1,
+                                        "endColumnIndex": int(val_col),
+                                    }
+                                ]
+                            }
+                        },
+                    },
+                }
+
+            requests.append(
+                {
+                    "addChart": {
+                        "chart": {
+                            "spec": spec,
+                            "position": {
+                                "overlayPosition": {
+                                    "anchorCell": {
+                                        "sheetId": sheet_id,
+                                        "rowIndex": 1 + (idx % 2) * 18,
+                                        "columnIndex": 6 + (idx // 2) * 8,
+                                    },
+                                    "offsetXPixels": 0,
+                                    "offsetYPixels": 0,
+                                    "widthPixels": 640,
+                                    "heightPixels": 360,
+                                }
+                            },
+                        }
+                    }
+                }
+            )
+
+        self.sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": requests},
+        ).execute()
+
+        return f"Created: {file_name} (Google Sheets id={spreadsheet_id})"
+
 
 def period_bounds(day: int) -> tuple[int, int]:
     start = ((day - 1) // 60) * 60 + 1
@@ -278,14 +465,37 @@ def parse_transactions(csv_file: Path) -> list[tuple[int, str, float]]:
             if not type_name:
                 continue
 
-            amount_raw = row[3].strip().replace(".", "").replace(",", ".")
+            amount_raw = row[3].strip()
             try:
-                amount = float(amount_raw)
+                amount = parse_amount(amount_raw)
             except ValueError:
                 continue
 
             rows.append((int(day_raw), type_name, amount))
     return rows
+
+
+def parse_amount(raw: str) -> float:
+    """Tutarları güvenli parse eder.
+
+    Oyun çıktısında ondalık ayracı nokta olabildiği için (`765.487`) noktayı
+    silmek büyük sapmaya yol açar. Bu fonksiyon hem nokta hem virgül içeren
+    değerleri destekler.
+    """
+    value = raw.strip().replace(" ", "")
+    if not value:
+        raise ValueError("empty amount")
+
+    if "," in value and "." in value:
+        # Son görülen işaret ondalık ayracıdır, diğeri binlik ayracı sayılır.
+        if value.rfind(",") > value.rfind("."):
+            value = value.replace(".", "").replace(",", ".")
+        else:
+            value = value.replace(",", "")
+    elif "," in value:
+        value = value.replace(",", ".")
+
+    return float(value)
 
 
 def summarize_daily_metrics(transactions: list[tuple[int, str, float]]) -> list[tuple[int, float, float, float]]:
@@ -340,9 +550,19 @@ def summarize_type_totals(transactions: list[tuple[int, str, float]]) -> tuple[l
     return income_rows, expense_rows
 
 
-def build_daily_summary_xlsx(period: str, transactions: list[tuple[int, str, float]]) -> bytes:
+def build_daily_sheet_payload(
+    period: str,
+    transactions: list[tuple[int, str, float]],
+) -> tuple[dict[str, dict[str, list[list[object]]]], list[dict[str, object]]]:
     metrics_rows = [list(row) for row in summarize_daily_metrics(transactions)]
     income_rows, expense_rows = summarize_type_totals(transactions)
+
+    if not metrics_rows:
+        metrics_rows = [[0, 0.0, 0.0, 0.0]]
+    if not income_rows:
+        income_rows = [("KazancYok", 0.0)]
+    if not expense_rows:
+        expense_rows = [("HarcamaYok", 0.0)]
 
     data_sheets = {
         "ozet": {
@@ -358,43 +578,27 @@ def build_daily_summary_xlsx(period: str, transactions: list[tuple[int, str, flo
             ],
         },
     }
-
     charts = [
-        {
-            "type": "bar",
-            "title": f"{period} Kazanc-Harcama",
-            "sheet": "ozet",
-            "cats_col": 1,
-            "series": [(2, "Kazanc"), (3, "Harcama")],
-        },
-        {
-            "type": "line",
-            "title": f"{period} Net Kazanc",
-            "sheet": "ozet",
-            "cats_col": 1,
-            "series": [(4, "NetKazanc")],
-        },
-        {
-            "type": "pie",
-            "title": f"{period} Turlere Gore Kazanc",
-            "sheet": "turler",
-            "cats_col": 1,
-            "series": [(2, "Kazanc")],
-        },
-        {
-            "type": "pie",
-            "title": f"{period} Turlere Gore Harcama",
-            "sheet": "turler",
-            "cats_col": 3,
-            "series": [(4, "Harcama")],
-        },
+        {"type": "bar", "title": f"{period} Kazanc-Harcama", "sheet": "ozet", "cats_col": 1, "series": [(2, "Kazanc"), (3, "Harcama")]},
+        {"type": "line", "title": f"{period} Net Kazanc", "sheet": "ozet", "cats_col": 1, "series": [(4, "NetKazanc")]},
+        {"type": "pie", "title": f"{period} Turlere Gore Kazanc", "sheet": "turler", "cats_col": 1, "series": [(2, "Kazanc")]},
+        {"type": "pie", "title": f"{period} Turlere Gore Harcama", "sheet": "turler", "cats_col": 3, "series": [(4, "Harcama")]},
     ]
-    return build_xlsx_with_charts("gunluk_ozet", data_sheets, charts)
+    return data_sheets, charts
 
 
-def build_period_totals_xlsx(transactions: list[tuple[int, str, float]]) -> bytes:
+def build_period_totals_sheet_payload(
+    transactions: list[tuple[int, str, float]],
+) -> tuple[dict[str, dict[str, list[list[object]]]], list[dict[str, object]]]:
     metrics_rows = [list(row) for row in summarize_period_metrics(transactions)]
     income_rows, expense_rows = summarize_type_totals(transactions)
+
+    if not metrics_rows:
+        metrics_rows = [["1-60", 0.0, 0.0, 0.0]]
+    if not income_rows:
+        income_rows = [("KazancYok", 0.0)]
+    if not expense_rows:
+        expense_rows = [("HarcamaYok", 0.0)]
 
     data_sheets = {
         "ozet": {
@@ -410,13 +614,96 @@ def build_period_totals_xlsx(transactions: list[tuple[int, str, float]]) -> byte
             ],
         },
     }
-
     charts = [
         {"type": "bar", "title": "Periyot Bazli Kazanc-Harcama", "sheet": "ozet", "cats_col": 1, "series": [(2, "Kazanc"), (3, "Harcama")]},
         {"type": "line", "title": "Periyot Bazli Net Kazanc", "sheet": "ozet", "cats_col": 1, "series": [(4, "NetKazanc")]},
         {"type": "pie", "title": "Turlere Gore Kazanc", "sheet": "turler", "cats_col": 1, "series": [(2, "Kazanc")]},
         {"type": "pie", "title": "Turlere Gore Harcama", "sheet": "turler", "cats_col": 3, "series": [(4, "Harcama")]},
     ]
+    return data_sheets, charts
+
+
+def build_daily_summary_csv(period: str, transactions: list[tuple[int, str, float]]) -> bytes:
+    metrics_rows = summarize_daily_metrics(transactions)
+    income_rows, expense_rows = summarize_type_totals(transactions)
+
+    lines: list[str] = [f"Periyot,{period}", ""]
+    lines.append("[Veri] Gunluk Ozet")
+    lines.append("Gun,Kazanc,Harcama,NetKazanc")
+    for day, income, expense, net in metrics_rows:
+        lines.append(f"{day},{income:.2f},{expense:.2f},{net:.2f}")
+
+    lines.append("")
+    lines.append("[Grafik] Sutun - Gunluk Kazanc/Harcama")
+    lines.append("Gun,Kazanc,Harcama")
+    for day, income, expense, _ in metrics_rows:
+        lines.append(f"{day},{income:.2f},{expense:.2f}")
+
+    lines.append("")
+    lines.append("[Grafik] Cizgi - Gunluk Net")
+    lines.append("Gun,NetKazanc")
+    for day, _income, _expense, net in metrics_rows:
+        lines.append(f"{day},{net:.2f}")
+
+    lines.append("")
+    lines.append("[Grafik] Pasta - Kazanc Turleri")
+    lines.append("Tur,Tutar")
+    for type_name, amount in income_rows:
+        lines.append(f"{type_name},{amount:.2f}")
+
+    lines.append("")
+    lines.append("[Grafik] Pasta - Harcama Turleri")
+    lines.append("Tur,Tutar")
+    for type_name, amount in expense_rows:
+        lines.append(f"{type_name},{amount:.2f}")
+
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def build_period_totals_csv(transactions: list[tuple[int, str, float]]) -> bytes:
+    metrics_rows = summarize_period_metrics(transactions)
+    income_rows, expense_rows = summarize_type_totals(transactions)
+
+    lines: list[str] = []
+    lines.append("[Veri] Periyot Ozet")
+    lines.append("Periyot,Kazanc,Harcama,NetKazanc")
+    for period, income, expense, net in metrics_rows:
+        lines.append(f"{period},{income:.2f},{expense:.2f},{net:.2f}")
+
+    lines.append("")
+    lines.append("[Grafik] Sutun - Periyot Bazli Kazanc/Harcama")
+    lines.append("Periyot,Kazanc,Harcama")
+    for period, income, expense, _ in metrics_rows:
+        lines.append(f"{period},{income:.2f},{expense:.2f}")
+
+    lines.append("")
+    lines.append("[Grafik] Cizgi - Periyot Bazli Net")
+    lines.append("Periyot,NetKazanc")
+    for period, _income, _expense, net in metrics_rows:
+        lines.append(f"{period},{net:.2f}")
+
+    lines.append("")
+    lines.append("[Grafik] Pasta - Toplam Kazanc Turleri")
+    lines.append("Tur,Tutar")
+    for type_name, amount in income_rows:
+        lines.append(f"{type_name},{amount:.2f}")
+
+    lines.append("")
+    lines.append("[Grafik] Pasta - Toplam Harcama Turleri")
+    lines.append("Tur,Tutar")
+    for type_name, amount in expense_rows:
+        lines.append(f"{type_name},{amount:.2f}")
+
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def build_daily_summary_xlsx(period: str, transactions: list[tuple[int, str, float]]) -> bytes:
+    data_sheets, charts = build_daily_sheet_payload(period, transactions)
+    return build_xlsx_with_charts("gunluk_ozet", data_sheets, charts)
+
+
+def build_period_totals_xlsx(transactions: list[tuple[int, str, float]]) -> bytes:
+    data_sheets, charts = build_period_totals_sheet_payload(transactions)
     return build_xlsx_with_charts("period_ozet", data_sheets, charts)
 
 
@@ -706,21 +993,21 @@ class TransactionsHandler(FileSystemEventHandler):
                 t for t in transactions if period_start <= t[0] <= period_end
             ]
 
-            daily_xlsx = build_daily_summary_xlsx(period, in_period)
-            daily_result = self.uploader.upload_or_update_in_parent(
-                daily_xlsx,
-                "main.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            daily_data_sheets, daily_charts = build_daily_sheet_payload(period, in_period)
+            daily_result = self.uploader.replace_google_sheet_with_charts(
+                "main",
                 period_folder_id,
+                daily_data_sheets,
+                daily_charts,
             )
             self.logger(f"[DRIVE] {daily_result}")
 
-            total_xlsx = build_period_totals_xlsx(transactions)
-            total_result = self.uploader.upload_or_update_in_parent(
-                total_xlsx,
-                "main_total.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            total_data_sheets, total_charts = build_period_totals_sheet_payload(transactions)
+            total_result = self.uploader.replace_google_sheet_with_charts(
+                "main_total",
                 root_folder_id,
+                total_data_sheets,
+                total_charts,
             )
             self.logger(f"[DRIVE] {total_result}")
             self._last_uploaded_day = day_value
