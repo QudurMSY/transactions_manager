@@ -46,6 +46,7 @@ from xml.sax.saxutils import escape
 
 import psutil
 from google.oauth2.credentials import Credentials
+from google.auth.exceptions import RefreshError
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
@@ -130,11 +131,25 @@ class DriveUploader:
             creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
 
         if not creds or not creds.valid:
+            refreshed = False
             if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
+                try:
+                    creds.refresh(Request())
+                    refreshed = True
+                except RefreshError as exc:
+                    message = str(exc).lower()
+                    # invalid_scope genelde eski/uyumsuz token'dan kaynaklanır.
+                    # Token'ı temizleyip OAuth akışını baştan çalıştırırız.
+                    if "invalid_scope" in message:
+                        creds = None
+                        refreshed = False
+                    else:
+                        raise
+
+            if not refreshed:
                 flow = InstalledAppFlow.from_client_secrets_file(str(credentials_file), SCOPES)
                 creds = flow.run_local_server(port=0)
+
             token_file.write_text(creds.to_json(), encoding="utf-8")
 
         return creds

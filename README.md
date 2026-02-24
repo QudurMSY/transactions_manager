@@ -186,6 +186,19 @@ python big_ambitions_drive_sync.py --no-gui
 4. API yeni açıldıysa 2-5 dakika bekleyip scripti tekrar çalıştırın.
 5. Eski yetki/oturum çakışmalarında `token.json` dosyasını silip yeniden OAuth girişi yapın.
 
+### Hata: `RefreshError: invalid_scope`
+**Sebep:** Mevcut `token.json` dosyası eski/uyumsuz scope ile üretilmiştir veya OAuth istemcisi değiştiği için refresh token artık geçerli scope setiyle uyuşmuyordur.
+
+**Çözüm:**
+1. Scriptin kullandığı `token.json` dosyasını silin.
+   - Varsayılan yol: credentials dosyasının yanındaki `token.json`
+   - Özel yol kullanıyorsanız `GOOGLE_TOKEN_FILE` değerini kontrol edin.
+2. Google Cloud projesinde hem **Google Drive API** hem **Google Sheets API** için `Enabled` durumunu doğrulayın.
+3. Scripti tekrar çalıştırın ve tarayıcıda OAuth izin ekranını yeniden onaylayın.
+4. Birden fazla Google hesabı açıksa doğru hesapla yetki verdiğinizden emin olun.
+
+> Not: Script `invalid_scope` durumunda artık otomatik olarak yeniden OAuth akışına düşecek şekilde güncellenmiştir.
+
 ### Hata: `Erişim engellendi ... Hata 403: access_denied`
 **Sebep:** OAuth consent screen büyük olasılıkla **Testing** modunda ve giriş yapan hesap test kullanıcısı listesinde değil.
 
