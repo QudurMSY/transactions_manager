@@ -35,10 +35,14 @@ import queue
 import threading
 import time
 import tkinter as tk
+import zipfile
+from collections import defaultdict
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Callable, Optional
 from tkinter import filedialog, messagebox
+from xml.sax.saxutils import escape
 
 import psutil
 from google.oauth2.credentials import Credentials
@@ -175,10 +179,13 @@ class DriveUploader:
         return kwargs
 
     def _find_existing_file_id(self, file_name: str) -> Optional[str]:
+        return self._find_existing_file_id_in_parent(file_name, self.folder_id)
+
+    def _find_existing_file_id_in_parent(self, file_name: str, parent_id: Optional[str]) -> Optional[str]:
         safe_name = file_name.replace("'", "\\'")
         query_parts = [f"name = '{safe_name}'", "trashed = false"]
-        if self.folder_id:
-            query_parts.append(f"'{self.folder_id}' in parents")
+        if parent_id:
+            query_parts.append(f"'{parent_id}' in parents")
         query = " and ".join(query_parts)
 
         response = (
@@ -189,9 +196,34 @@ class DriveUploader:
         files = response.get("files", [])
         return files[0]["id"] if files else None
 
-    def upload_or_update(self, csv_bytes: bytes, drive_name: str) -> str:
-        existing_id = self._find_existing_file_id(drive_name)
-        media = MediaInMemoryUpload(csv_bytes, mimetype="text/csv", resumable=False)
+    def ensure_folder(self, folder_name: str, parent_id: Optional[str]) -> str:
+        existing_id = self._find_existing_file_id_in_parent(folder_name, parent_id)
+        if existing_id:
+            return existing_id
+
+        metadata: dict[str, object] = {
+            "name": folder_name,
+            "mimeType": "application/vnd.google-apps.folder",
+        }
+        if parent_id:
+            metadata["parents"] = [parent_id]
+
+        created = (
+            self.service.files()
+            .create(body=metadata, fields="id", supportsAllDrives=True)
+            .execute()
+        )
+        return created["id"]
+
+    def upload_or_update_in_parent(
+        self,
+        file_bytes: bytes,
+        file_name: str,
+        mime_type: str,
+        parent_id: Optional[str],
+    ) -> str:
+        existing_id = self._find_existing_file_id_in_parent(file_name, parent_id)
+        media = MediaInMemoryUpload(file_bytes, mimetype=mime_type, resumable=False)
 
         if existing_id:
             self.service.files().update(
@@ -199,11 +231,11 @@ class DriveUploader:
                 media_body=media,
                 supportsAllDrives=True,
             ).execute()
-            return f"Updated: {drive_name} (id={existing_id})"
+            return f"Updated: {file_name} (id={existing_id})"
 
-        metadata = {"name": drive_name}
-        if self.folder_id:
-            metadata["parents"] = [self.folder_id]
+        metadata: dict[str, object] = {"name": file_name}
+        if parent_id:
+            metadata["parents"] = [parent_id]
 
         created = (
             self.service.files()
@@ -215,7 +247,403 @@ class DriveUploader:
             )
             .execute()
         )
-        return f"Created: {drive_name} (id={created.get('id')})"
+        return f"Created: {file_name} (id={created.get('id')})"
+
+    def upload_or_update(self, csv_bytes: bytes, drive_name: str) -> str:
+        return self.upload_or_update_in_parent(csv_bytes, drive_name, "text/csv", self.folder_id)
+
+
+def period_bounds(day: int) -> tuple[int, int]:
+    start = ((day - 1) // 60) * 60 + 1
+    end = start + 59
+    return start, end
+
+
+def period_label(day: int) -> str:
+    start, end = period_bounds(day)
+    return f"{start}-{end}"
+
+
+def parse_transactions(csv_file: Path) -> list[tuple[int, str, float]]:
+    rows: list[tuple[int, str, float]] = []
+    with csv_file.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) < 4:
+                continue
+            day_raw = row[1].strip()
+            if not day_raw.isdigit():
+                continue
+            type_name = row[2].strip()
+            if not type_name:
+                continue
+
+            amount_raw = row[3].strip().replace(".", "").replace(",", ".")
+            try:
+                amount = float(amount_raw)
+            except ValueError:
+                continue
+
+            rows.append((int(day_raw), type_name, amount))
+    return rows
+
+
+def summarize_daily_metrics(transactions: list[tuple[int, str, float]]) -> list[tuple[int, float, float, float]]:
+    grouped: dict[int, dict[str, float]] = defaultdict(lambda: {"income": 0.0, "expense": 0.0})
+    for day, _type_name, amount in transactions:
+        if amount >= 0:
+            grouped[day]["income"] += amount
+        else:
+            grouped[day]["expense"] += abs(amount)
+
+    rows: list[tuple[int, float, float, float]] = []
+    for day in sorted(grouped):
+        income = round(grouped[day]["income"], 2)
+        expense = round(grouped[day]["expense"], 2)
+        net = round(income - expense, 2)
+        rows.append((day, income, expense, net))
+    return rows
+
+
+def summarize_period_metrics(transactions: list[tuple[int, str, float]]) -> list[tuple[str, float, float, float]]:
+    grouped: dict[str, dict[str, float]] = defaultdict(lambda: {"income": 0.0, "expense": 0.0})
+    for day, _type_name, amount in transactions:
+        period = period_label(day)
+        if amount >= 0:
+            grouped[period]["income"] += amount
+        else:
+            grouped[period]["expense"] += abs(amount)
+
+    def period_sort_key(label: str) -> int:
+        return int(label.split("-", 1)[0])
+
+    rows: list[tuple[str, float, float, float]] = []
+    for period in sorted(grouped, key=period_sort_key):
+        income = round(grouped[period]["income"], 2)
+        expense = round(grouped[period]["expense"], 2)
+        net = round(income - expense, 2)
+        rows.append((period, income, expense, net))
+    return rows
+
+
+def summarize_type_totals(transactions: list[tuple[int, str, float]]) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+    income_types: dict[str, float] = defaultdict(float)
+    expense_types: dict[str, float] = defaultdict(float)
+    for _day, type_name, amount in transactions:
+        if amount >= 0:
+            income_types[type_name] += amount
+        else:
+            expense_types[type_name] += abs(amount)
+
+    income_rows = sorted(((k, round(v, 2)) for k, v in income_types.items()), key=lambda item: item[0])
+    expense_rows = sorted(((k, round(v, 2)) for k, v in expense_types.items()), key=lambda item: item[0])
+    return income_rows, expense_rows
+
+
+def build_daily_summary_xlsx(period: str, transactions: list[tuple[int, str, float]]) -> bytes:
+    metrics_rows = [list(row) for row in summarize_daily_metrics(transactions)]
+    income_rows, expense_rows = summarize_type_totals(transactions)
+
+    data_sheets = {
+        "ozet": {
+            "headers": ["Gun", "Kazanc", "Harcama", "NetKazanc"],
+            "rows": metrics_rows,
+        },
+        "turler": {
+            "headers": ["KazancTuru", "KazancToplam", "HarcamaTuru", "HarcamaToplam"],
+            "rows": [
+                [income_rows[i][0] if i < len(income_rows) else "", income_rows[i][1] if i < len(income_rows) else "",
+                 expense_rows[i][0] if i < len(expense_rows) else "", expense_rows[i][1] if i < len(expense_rows) else ""]
+                for i in range(max(len(income_rows), len(expense_rows), 1))
+            ],
+        },
+    }
+
+    charts = [
+        {
+            "type": "bar",
+            "title": f"{period} Kazanc-Harcama",
+            "sheet": "ozet",
+            "cats_col": 1,
+            "series": [(2, "Kazanc"), (3, "Harcama")],
+        },
+        {
+            "type": "line",
+            "title": f"{period} Net Kazanc",
+            "sheet": "ozet",
+            "cats_col": 1,
+            "series": [(4, "NetKazanc")],
+        },
+        {
+            "type": "pie",
+            "title": f"{period} Turlere Gore Kazanc",
+            "sheet": "turler",
+            "cats_col": 1,
+            "series": [(2, "Kazanc")],
+        },
+        {
+            "type": "pie",
+            "title": f"{period} Turlere Gore Harcama",
+            "sheet": "turler",
+            "cats_col": 3,
+            "series": [(4, "Harcama")],
+        },
+    ]
+    return build_xlsx_with_charts("gunluk_ozet", data_sheets, charts)
+
+
+def build_period_totals_xlsx(transactions: list[tuple[int, str, float]]) -> bytes:
+    metrics_rows = [list(row) for row in summarize_period_metrics(transactions)]
+    income_rows, expense_rows = summarize_type_totals(transactions)
+
+    data_sheets = {
+        "ozet": {
+            "headers": ["Periyot", "Kazanc", "Harcama", "NetKazanc"],
+            "rows": metrics_rows,
+        },
+        "turler": {
+            "headers": ["KazancTuru", "KazancToplam", "HarcamaTuru", "HarcamaToplam"],
+            "rows": [
+                [income_rows[i][0] if i < len(income_rows) else "", income_rows[i][1] if i < len(income_rows) else "",
+                 expense_rows[i][0] if i < len(expense_rows) else "", expense_rows[i][1] if i < len(expense_rows) else ""]
+                for i in range(max(len(income_rows), len(expense_rows), 1))
+            ],
+        },
+    }
+
+    charts = [
+        {"type": "bar", "title": "Periyot Bazli Kazanc-Harcama", "sheet": "ozet", "cats_col": 1, "series": [(2, "Kazanc"), (3, "Harcama")]},
+        {"type": "line", "title": "Periyot Bazli Net Kazanc", "sheet": "ozet", "cats_col": 1, "series": [(4, "NetKazanc")]},
+        {"type": "pie", "title": "Turlere Gore Kazanc", "sheet": "turler", "cats_col": 1, "series": [(2, "Kazanc")]},
+        {"type": "pie", "title": "Turlere Gore Harcama", "sheet": "turler", "cats_col": 3, "series": [(4, "Harcama")]},
+    ]
+    return build_xlsx_with_charts("period_ozet", data_sheets, charts)
+
+
+def build_xlsx_with_charts(_sheet_name: str, data_sheets: dict[str, dict[str, list[list[object]]]], charts: list[dict[str, object]]) -> bytes:
+    sheet_names = list(data_sheets.keys()) + ["grafikler"]
+    sheet_xml_map = {
+        name: _build_sheet_xml([spec["headers"]] + spec["rows"])
+        for name, spec in data_sheets.items()
+    }
+    sheet_xml_map["grafikler"] = _build_chart_sheet_xml()
+
+    workbook_sheets = []
+    workbook_rels = []
+    for idx, name in enumerate(sheet_names, start=1):
+        workbook_sheets.append(f'<sheet name="{escape(name)}" sheetId="{idx}" r:id="rId{idx}"/>')
+        workbook_rels.append(
+            f'<Relationship Id="rId{idx}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{idx}.xml"/>'
+        )
+
+    styles_rel_id = len(sheet_names) + 1
+    workbook_rels.append(
+        f'<Relationship Id="rId{styles_rel_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+    )
+
+    chart_sheet_index = len(sheet_names)
+    chart_sheet_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>'
+        '</Relationships>'
+    )
+
+    drawing_xml = _build_drawing_xml(len(charts))
+    drawing_rels = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">']
+    for idx in range(1, len(charts) + 1):
+        drawing_rels.append(
+            f'<Relationship Id="rId{idx}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart{idx}.xml"/>'
+        )
+    drawing_rels.append('</Relationships>')
+
+    chart_xml_list = []
+    for idx, chart in enumerate(charts, start=1):
+        chart_xml_list.append(_build_chart_xml(idx, chart, data_sheets))
+
+    content_types = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+        '<Default Extension="xml" ContentType="application/xml"/>',
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>',
+        '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>',
+        '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>',
+    ]
+    for idx in range(1, len(sheet_names) + 1):
+        content_types.append(f'<Override PartName="/xl/worksheets/sheet{idx}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>')
+    content_types.append('<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>')
+    for idx in range(1, len(charts) + 1):
+        content_types.append(f'<Override PartName="/xl/charts/chart{idx}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>')
+    content_types.append('</Types>')
+
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>"""
+
+    workbook = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f"<sheets>{''.join(workbook_sheets)}</sheets></workbook>"
+    )
+
+    workbook_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f"{''.join(workbook_rels)}</Relationships>"
+    )
+
+    styles = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border/></borders>
+  <cellStyleXfs count="1"><xf/></cellStyleXfs>
+  <cellXfs count="1"><xf/></cellXfs>
+</styleSheet>"""
+
+    core = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>Big Ambitions Summary</dc:title>
+</cp:coreProperties>"""
+
+    app = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>Python</Application>
+</Properties>"""
+
+    output = BytesIO()
+    with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", ''.join(content_types))
+        archive.writestr("_rels/.rels", rels)
+        archive.writestr("docProps/core.xml", core)
+        archive.writestr("docProps/app.xml", app)
+        archive.writestr("xl/workbook.xml", workbook)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        archive.writestr("xl/styles.xml", styles)
+        for idx, name in enumerate(sheet_names, start=1):
+            archive.writestr(f"xl/worksheets/sheet{idx}.xml", sheet_xml_map[name])
+        archive.writestr(f"xl/worksheets/_rels/sheet{chart_sheet_index}.xml.rels", chart_sheet_rels)
+        archive.writestr("xl/drawings/drawing1.xml", drawing_xml)
+        archive.writestr("xl/drawings/_rels/drawing1.xml.rels", ''.join(drawing_rels))
+        for idx, chart_xml in enumerate(chart_xml_list, start=1):
+            archive.writestr(f"xl/charts/chart{idx}.xml", chart_xml)
+    return output.getvalue()
+
+
+def _build_chart_sheet_xml() -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheetData/><drawing r:id="rId1"/></worksheet>'
+    )
+
+
+def _cell_range(sheet: str, col: int, start_row: int, end_row: int) -> str:
+    col_letter = _column_letter(col)
+    safe_sheet = sheet.replace("'", "''")
+    return f"'{safe_sheet}'!${col_letter}${start_row}:${col_letter}${end_row}"
+
+
+def _build_chart_xml(chart_index: int, chart: dict[str, object], data_sheets: dict[str, dict[str, list[list[object]]]]) -> str:
+    chart_type = str(chart["type"])
+    title = escape(str(chart["title"]))
+    sheet = str(chart["sheet"])
+    cats_col = int(chart["cats_col"])
+    series = chart["series"]
+    row_count = len(data_sheets[sheet]["rows"]) + 1
+    start_row = 2
+    end_row = max(row_count, 2)
+    cat_range = _cell_range(sheet, cats_col, start_row, end_row)
+
+    series_xml = []
+    for idx, (val_col, name) in enumerate(series):
+        val_range = _cell_range(sheet, int(val_col), start_row, end_row)
+        series_xml.append(
+            '<c:ser>'
+            f'<c:idx val="{idx}"/><c:order val="{idx}"/>'
+            f'<c:tx><c:v>{escape(str(name))}</c:v></c:tx>'
+            f'<c:cat><c:strRef><c:f>{cat_range}</c:f></c:strRef></c:cat>'
+            f'<c:val><c:numRef><c:f>{val_range}</c:f></c:numRef></c:val>'
+            '</c:ser>'
+        )
+
+    if chart_type == "bar":
+        plot = f'<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>{"".join(series_xml)}<c:axId val="1"/><c:axId val="2"/></c:barChart>'
+        axes = '<c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="2"/><c:crosses val="autoZero"/></c:catAx><c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="l"/><c:majorGridlines/><c:tickLblPos val="nextTo"/><c:crossAx val="1"/><c:crosses val="autoZero"/></c:valAx>'
+    elif chart_type == "line":
+        plot = f'<c:lineChart><c:grouping val="standard"/>{"".join(series_xml)}<c:axId val="1"/><c:axId val="2"/></c:lineChart>'
+        axes = '<c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="2"/><c:crosses val="autoZero"/></c:catAx><c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="l"/><c:majorGridlines/><c:tickLblPos val="nextTo"/><c:crossAx val="1"/><c:crosses val="autoZero"/></c:valAx>'
+    else:
+        plot = f'<c:pieChart>{"".join(series_xml)}</c:pieChart>'
+        axes = ''
+
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        '<c:chart>'
+        f'<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>{title}</a:t></a:r></a:p></c:rich></c:tx></c:title>'
+        f'<c:plotArea><c:layout/>{plot}{axes}</c:plotArea>'
+        '<c:legend><c:legendPos val="r"/></c:legend>'
+        '</c:chart></c:chartSpace>'
+    )
+
+
+def _build_drawing_xml(chart_count: int) -> str:
+    anchors = []
+    positions = [(0,0),(8,0),(0,18),(8,18)]
+    for idx in range(chart_count):
+        col,row = positions[idx] if idx < len(positions) else (0, idx*16)
+        anchors.append(
+            '<xdr:twoCellAnchor>'
+            f'<xdr:from><xdr:col>{col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>'
+            f'<xdr:to><xdr:col>{col+7}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{row+15}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>'
+            '<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="{idv}" name="Chart {idv}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId{idv}"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/>'
+            '</xdr:twoCellAnchor>'.format(idv=idx+1)
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        f"{''.join(anchors)}</xdr:wsDr>"
+    )
+
+
+def _build_sheet_xml(rows: list[list[object]]) -> str:
+    row_xml: list[str] = []
+    for row_idx, row_values in enumerate(rows, start=1):
+        cells: list[str] = []
+        for col_idx, value in enumerate(row_values, start=1):
+            cell_ref = f"{_column_letter(col_idx)}{row_idx}"
+            if isinstance(value, (int, float)):
+                cells.append(f"<c r=\"{cell_ref}\"><v>{value}</v></c>")
+            else:
+                cells.append(
+                    f"<c r=\"{cell_ref}\" t=\"inlineStr\"><is><t>{escape(str(value))}</t></is></c>"
+                )
+        row_xml.append(f"<row r=\"{row_idx}\">{''.join(cells)}</row>")
+
+    return (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+        "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
+        f"<sheetData>{''.join(row_xml)}</sheetData>"
+        "</worksheet>"
+    )
+
+
+def _column_letter(index: int) -> str:
+    label = ""
+    current = index
+    while current:
+        current, rem = divmod(current - 1, 26)
+        label = chr(65 + rem) + label
+    return label
 
 
 class TransactionsHandler(FileSystemEventHandler):
@@ -258,8 +686,43 @@ class TransactionsHandler(FileSystemEventHandler):
 
             drive_name = f"transactionsgun_{day_value}.csv"
             csv_bytes = self._read_csv_bytes_with_retry(changed_file)
-            result = self.uploader.upload_or_update(csv_bytes, drive_name)
+            day_number = int(day_value)
+            period = period_label(day_number)
+
+            root_folder_id = self.uploader.ensure_folder("big ambitions", self.uploader.folder_id)
+            period_folder_id = self.uploader.ensure_folder(period, root_folder_id)
+
+            result = self.uploader.upload_or_update_in_parent(
+                csv_bytes,
+                drive_name,
+                "text/csv",
+                period_folder_id,
+            )
             self.logger(f"[DRIVE] {result}")
+
+            transactions = parse_transactions(changed_file)
+            period_start, period_end = period_bounds(day_number)
+            in_period = [
+                t for t in transactions if period_start <= t[0] <= period_end
+            ]
+
+            daily_xlsx = build_daily_summary_xlsx(period, in_period)
+            daily_result = self.uploader.upload_or_update_in_parent(
+                daily_xlsx,
+                "main.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                period_folder_id,
+            )
+            self.logger(f"[DRIVE] {daily_result}")
+
+            total_xlsx = build_period_totals_xlsx(transactions)
+            total_result = self.uploader.upload_or_update_in_parent(
+                total_xlsx,
+                "main_total.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                root_folder_id,
+            )
+            self.logger(f"[DRIVE] {total_result}")
             self._last_uploaded_day = day_value
             self._last_uploaded_mtime = file_mtime
         except HttpError as exc:
