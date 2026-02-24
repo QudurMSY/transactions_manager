@@ -10,164 +10,192 @@ Big Ambitions oyunundaki `transactions.csv` dosyasını izler, değişim oldukç
 
 ---
 
-## Kurulum
+## 1) Kurulum
 
+### 1.1 Python paketlerini yükle
 ```bash
 pip install -r requirements.txt
 ```
 
----
-
-## Google Cloud + Google Drive kurulumu (adım adım)
-
-Bu uygulama **OAuth popup** açmaz; bunun yerine **Service Account JSON** kullanır.
-
-> Not: Script artık Drive API için `drive` scope'u kullanır (önceki `drive.file` yerine). Service account ile paylaşılan klasör doğrulamasında görülen sahte `404 notFound` vakalarını azaltmak için gereklidir.
-
-### 1) Google Cloud projesi oluştur
-1. https://console.cloud.google.com/ aç.
-2. Sağ üstten mevcut bir proje seç veya **New Project** ile yeni bir proje oluştur.
-
-### 2) Google Drive API'yi aç
-1. Sol menü: **APIs & Services > Library**.
-2. `Google Drive API` ara.
-3. **Enable** tıkla.
-
-### 3) Service Account oluştur
-1. Sol menü: **APIs & Services > Credentials**.
-2. **Create Credentials > Service account**.
-3. Hesaba isim ver (ör. `big-ambitions-sync`) ve oluştur.
-
-### 4) JSON key indir
-1. Oluşturulan service account detayına gir.
-2. **Keys** sekmesi.
-3. **Add key > Create new key > JSON**.
-4. İnen dosyayı projeye kopyala:
-   - Varsayılan ad: `service_account_credentials.json`
-   - veya farklı bir yol için `SERVICE_ACCOUNT_FILE` kullan.
-
-### 5) Drive klasörü oluştur ve paylaş
-> Önemli: Service Account'un kişisel “My Drive” kotası yoktur. **Hedef klasörün Shared Drive içinde olması gerekir**; kullanıcıların kişisel My Drive klasörleri genelde `storageQuotaExceeded` üretir.
-
-1. Google Drive'da bir klasör aç/oluştur (ör. `BigAmbitionsSync`).
-2. **Shared Drive** içinde klasör aç (önerilen) veya mevcut Shared Drive klasörü seç.
-3. Service account e-postasını ekle:
-   - JSON içindeki `client_email` alanı.
-4. Yetkiyi en az **Content manager** (veya Manager) ver.
-5. Klasör URL’sinden klasör ID’yi al:
-   - `https://drive.google.com/drive/folders/<BURASI_FOLDER_ID>`
-
-### 6) Uygulamaya Folder ID ver
-Aşağıdakilerden biriyle verilebilir:
-- GUI’de **Drive Folder ID** alanına yapıştır.
-- veya ortam değişkeni:
-  - Windows: `set GDRIVE_FOLDER_ID=...`
-  - PowerShell: `$env:GDRIVE_FOLDER_ID="..."`
+### 1.2 Script dosyaları
+Aynı klasörde şunlar olmalı:
+- `big_ambitions_drive_sync.py`
+- `requirements.txt`
+- (birazdan oluşturacağınız) OAuth JSON dosyası
 
 ---
 
-## Çalıştırma
+## 2) OAuth kurulumunu adım adım yap (kişisel Google hesabı)
 
-### GUI ile (önerilen)
+> Bu proje artık **sadece kişisel Google hesabı + OAuth** destekler. Service Account kullanılmaz.
+
+Aşağıdaki adımları sırayla yapın:
+
+### 2.1 Google Cloud projesi oluştur
+1. Tarayıcıdan `https://console.cloud.google.com/` açın.
+2. Üstteki proje seçicisinden:
+   - yeni proje oluşturun (**New Project**) veya
+   - mevcut bir projeyi seçin.
+
+### 2.2 Google Drive API’yi aç
+1. Sol menü: **APIs & Services > Library**
+2. Arama kutusuna `Google Drive API` yazın.
+3. **Enable** (Etkinleştir) butonuna basın.
+
+### 2.3 OAuth consent screen ayarla
+1. Sol menü: **APIs & Services > OAuth consent screen**
+2. User Type seçin:
+   - kişisel hesap kullanıyorsanız genelde **External**
+3. Gerekli alanları doldurun (App name, User support email, Developer contact email).
+4. Kaydedin.
+
+### 2.4 OAuth Client ID oluştur
+1. Sol menü: **APIs & Services > Credentials**
+2. **Create Credentials > OAuth client ID**
+3. Application type: **Desktop app**
+4. Bir isim verin (ör. `big-ambitions-desktop`)
+5. Create deyin ve oluşan JSON’u indirin.
+
+### 2.5 JSON dosyasını projeye koy
+İndirdiğiniz dosyayı proje klasörüne kopyalayın ve şu isimlerden biriyle kullanın:
+- `oauth_client_credentials.json` (**önerilen**)
+- veya `credentials.json`
+
+> Alternatif: Dosya başka klasördeyse `GOOGLE_CREDENTIALS_FILE` ile tam yol verebilirsiniz.
+
+---
+
+## 3) Drive klasörünü bağlama (folder ID alma) adım adım
+
+Bu adım çok önemli. İsterseniz belirli bir klasöre, isterseniz Drive root’a yükleyebilirsiniz.
+
+### Seçenek A — Belirli bir klasöre yükle (önerilen)
+1. Google Drive’da bir klasör oluşturun (ör. `BigAmbitionsSync`).
+2. Klasöre girin, tarayıcı adres çubuğunu kopyalayın.
+3. URL örneği:
+   - `https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQr...`
+4. Buradaki `1AbCdEfGhIjKlMnOpQr...` kısmı **Folder ID**’dir.
+5. Bu ID’yi GUI’de **Drive Folder ID** alanına yapıştırın
+   - veya `GDRIVE_FOLDER_ID` env var olarak verin.
+
+### Seçenek B — Drive root’a yükle
+- `GDRIVE_FOLDER_ID` vermeyin (boş bırakın).
+- Dosyalar hesabınızın ana Drive alanına gider.
+
+---
+
+## 4) İlk çalıştırma ve hesap doğrulama
+
+İlk kez çalıştırdığınızda OAuth akışı devreye girer:
+
+1. Scripti başlatın.
+2. Tarayıcı açılır ve Google hesabı seçmeniz istenir.
+3. Drive erişim iznini onaylayın.
+4. Onay sonrası script klasöründe `token.json` oluşur.
+5. Sonraki çalıştırmalarda tekrar giriş istemez (token geçerliyse).
+
+---
+
+## 5) Çalıştırma
+
+### 5.1 GUI ile (kolay yöntem)
 ```bash
 python big_ambitions_drive_sync.py
 ```
 
-- Ayarları doldurup **Başlat** deyin.
-- Uygulama artık **kendini kapatmaz/gizlemez**, pencere açık kalır.
-- İzleme arka planda thread içinde devam eder.
+GUI’de doldurmanız gerekenler:
+- **SaveGames klasörü**
+- **OAuth Credentials JSON**
+- **Drive Folder ID** (opsiyonel)
+- Process adları (gerekirse)
+- Alt bölümdeki **Canlı log** kutusunda `[INFO]/[WARN]/[ERROR]` mesajlarını anlık görebilirsiniz.
 
-### GUI olmadan
+### 5.2 GUI olmadan
 ```bash
 python big_ambitions_drive_sync.py --no-gui
 ```
 
-### Sadece ön kontrol
+### 5.3 Sadece kurulum kontrolü
 ```bash
 python big_ambitions_drive_sync.py --doctor --no-gui
 ```
 
 ---
 
-## Ortam değişkenleri
-- `SERVICE_ACCOUNT_FILE`: JSON dosya yolu.
-- `GDRIVE_FOLDER_ID`: Yükleme yapılacak Drive klasör ID’si (önerilen/zorunlu kullanım).
-- `GAME_PROCESS_NAMES`: Virgülle ayrılmış process adları.
+## 6) Ortam değişkenleri (Windows CMD / PowerShell)
 
-Örnek:
-```bash
-set SERVICE_ACCOUNT_FILE=C:\keys\service_account_credentials.json
-set GDRIVE_FOLDER_ID=1AbCdEfGh...
-set GAME_PROCESS_NAMES=Big Ambitions.exe,Big_Ambitions.exe,BigAmbitions.exe,UnityPlayer.exe
+### 6.1 Değişkenler
+- `GOOGLE_CREDENTIALS_FILE`: OAuth client JSON dosya yolu
+- `GOOGLE_TOKEN_FILE`: token dosya yolu (varsayılan: credentials dosyasının yanında `token.json`)
+- `GDRIVE_FOLDER_ID`: hedef Drive klasör ID (opsiyonel)
+- `GAME_PROCESS_NAMES`: virgülle process adları
+
+### 6.2 Windows CMD örneği
+```bat
+set GOOGLE_CREDENTIALS_FILE=C:\keys\oauth_client_credentials.json
+set GOOGLE_TOKEN_FILE=C:\keys\token.json
+set GDRIVE_FOLDER_ID=1AbCdEfGhIjKlMnOpQr
+python big_ambitions_drive_sync.py --no-gui
+```
+
+### 6.3 PowerShell örneği
+```powershell
+$env:GOOGLE_CREDENTIALS_FILE="C:\keys\oauth_client_credentials.json"
+$env:GOOGLE_TOKEN_FILE="C:\keys\token.json"
+$env:GDRIVE_FOLDER_ID="1AbCdEfGhIjKlMnOpQr"
 python big_ambitions_drive_sync.py --no-gui
 ```
 
 ---
 
-## Sık hata ve çözüm
+## 7) Sık yapılan hatalar ve net çözümler
 
+### Hata: `Google credentials dosyası yok`
+**Sebep:** JSON yolu yanlış veya dosya yok.
 
-### Olası hata senaryoları (hızlı checklist)
-1. `GDRIVE_FOLDER_ID` boş/yanlış (`.`, `root`, kısa değer, klasör adı girme)
-2. Verilen ID erişilebilir değil (404 notFound)
-3. Klasör kişisel My Drive'da (403 storageQuotaExceeded)
-4. Service account e-postası klasöre/Shared Drive'a eklenmemiş
-5. Yetki yetersiz (viewer/commenter ise upload yapılamaz)
-6. Drive API projede kapalı
-7. Yanlış service account JSON dosyası kullanılıyor
-8. `transactions.csv` oyun tarafından kilitli (WinError 32 / EACCES)
-9. CSV formatı bozuk, gün sütunu (B) okunamıyor
-10. Oyun process adı farklı olduğu için izleme başlamıyor
+**Çözüm:**
+1. JSON dosyasının gerçekten var olduğunu kontrol edin.
+2. `GOOGLE_CREDENTIALS_FILE` yolunu doğru girin.
+3. Dosya adı `oauth_client_credentials.json` ise proje klasöründe olduğundan emin olun.
 
+### Hata: `HTTP 404 fileId notFound`
+**Sebep:** `GDRIVE_FOLDER_ID` yanlış, eksik, farklı hesaba ait veya erişiminiz yok.
 
-### Log seviyeleri ne anlama geliyor?
-- `[INFO]`: Normal durum bilgisi (izleme başlatıldı/durduruldu, duplicate event atlandı vb.).
-- `[WATCHDOG]`: Dosya sistemi değişimi algılandı (`transactions.csv` update event'i geldi).
-- `[DRIVE]`: Google Drive upload/update başarılı.
-- `[WARN]`: Geçici/iyileştirilebilir durum (dosya kilidi, klasör bulunamaması, gün değeri okunamaması vb.).
-- `[ERROR]`: İşlem hatası (Drive API veya beklenmeyen runtime hatası).
+**Çözüm:**
+1. Klasörü Drive’da açın.
+2. URL’den sadece `/folders/` sonrası ID’yi alın.
+3. Doğru Google hesabıyla giriş yaptığınızdan emin olun.
+4. Folder ID alanına klasör adını değil ID’yi yazın.
 
-### `[ERROR] ... Drive 403 storageQuotaExceeded`
-Sebep: Service Account hesabının kişisel **My Drive** depolama alanı yoktur. Hedef klasör kişisel My Drive altındaysa (ID doğru olsa bile) dosya oluşturma sırasında 403 gelebilir.
+### Hata: `HTTP 403 storageQuotaExceeded`
+**Sebep:** Drive kotası dolu olabilir.
 
-Çözüm (adım adım):
-1. Google Drive'da bir **Shared Drive** içinde hedef klasör açın.
-2. `service_account_credentials.json` içindeki `client_email` adresini Shared Drive'a **Content manager** veya **Manager** olarak ekleyin.
-3. Klasör URL'sinden yalnızca ID'yi kopyalayın:
-   - `https://drive.google.com/drive/folders/<BURASI_FOLDER_ID>`
-4. Bu ID'yi uygulamaya verin:
-   - GUI: **Drive Folder ID**
-   - veya ortam değişkeni: `GDRIVE_FOLDER_ID=<BURASI_FOLDER_ID>`
-5. Uygulama başlangıcında çıkan `Drive hedef kontrolü: Doğrulandı ...` satırını kontrol edin.
+**Çözüm:**
+1. Google Drive depolama kullanımınızı kontrol edin.
+2. Yer açın veya farklı hesapla deneyin.
 
-İpucu: `.`, `root`, kısa/eksik ID ya da klasör adı (ID yerine) kullanmayın.
-Windows'ta `set GDRIVE_FOLDER_ID=...` sadece açtığınız mevcut CMD oturumunda geçerlidir; scripti başka yerden (ör. çift tık) başlatırsanız değişken taşınmayabilir.
+### Hata: Tarayıcı açılmıyor / OAuth tamamlanmıyor
+**Çözüm:**
+1. Scripti normal kullanıcı haklarıyla tekrar başlatın.
+2. Güvenlik duvarı/local browser kısıtlarını kontrol edin.
+3. Gerekirse farklı varsayılan tarayıcı ile tekrar deneyin.
 
-### `WinError 32` (dosya kullanımda)
-Bu hata/uyarı genelde Windows'ta oyun dosyayı o anda yazarken oluşur. Yeni sürümde temp dosya yerine bellekten upload yapıldığı için kilit kaynaklı yan etkiler azaldı, ancak kaynak `transactions.csv` kilitliyse script kısa aralıklarla tekrar dener.
+### Hata: `WinError 32`
+**Sebep:** Oyun dosyayı o anda yazıyor (dosya kilidi).
 
-### `HTTP 404: File not found: .` / `location: fileId`
-Sebep: **Drive Folder ID** alanına geçersiz değer (ör. `.`, `GDRIVE_FOLDER_ID`, `Drive Folder ID`) girilmiştir veya URL yanlış kopyalanmıştır.
+**Çözüm:**
+- Geçici bir durumdur; script zaten otomatik retry yapar.
 
-Not: ID doğru görünse bile, Service Account klasöre/Shared Drive'a ekli değilse Google Drive API bazen güvenlik nedeniyle yine `404 notFound` döndürebilir.
-Aynı durum, klasöre eklediğiniz hesapla **farklı bir service account JSON** dosyası kullandığınızda da görülür (örn. benzer isimli ama başka `client_email`).
+---
 
-Neden önceki düzeltme tek başına her zaman yetmeyebilir?
-- `drive` scope'a geçmek bazı "yetki kısıtlılığı" kaynaklı sahte 404 vakalarını azaltır.
-- Ancak **yanlış klasör ID**, **yanlış JSON dosyası** veya **service account üyeliği eksikse** hata devam eder.
-- Bu yüzden uygulama artık hata mesajında kullanılan `GDRIVE_FOLDER_ID` ve `client_email` bilgisini de gösterir; doğru hesapla doğru klasörü eşleştirmeyi kolaylaştırır.
-
-Çözüm:
-1. Google Drive klasörünüzü açın.
-2. URL'den yalnızca klasör ID kısmını alın:
-   - `https://drive.google.com/drive/folders/<BURASI_FOLDER_ID>`
-3. Uygulamadaki **Drive Folder ID** alanına yalnızca bu ID'yi girin.
-4. Klasörün service account e-postası ile paylaşıldığını kontrol edin.
-5. JSON içindeki `client_email` ile Drive'a eklediğiniz e-postanın birebir aynı olduğundan emin olun.
+## 8) Temiz başlangıç (reset) nasıl yapılır?
+OAuth’u baştan kurmak isterseniz:
+1. `token.json` dosyasını silin.
+2. Scripti tekrar başlatın.
+3. Tarayıcıdan hesabı yeniden seçip izin verin.
 
 ---
 
 ## Notlar
 - Script Windows path yapısına göre yazılmıştır.
-- Oyun süreci kapanınca izleme durur, açılınca tekrar başlar.
-- Aynı dosya değişimi için duplicate event filtreleme yapılır.
+- Oyun kapanınca izleme durur, açılınca tekrar başlar.

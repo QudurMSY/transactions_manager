@@ -13,13 +13,14 @@ Bu script şunları yapar:
 4) CSV'den ilk veri satırının B sütunundaki (index=1) gün bilgisini okur.
 5) Dosyayı transactionsgun_<gun>.csv adıyla Google Drive'a create/update eder.
 
-Önemli:
-- Service Account JSON dosyası varsayılan olarak script ile aynı klasörde
-  service_account_credentials.json adıyla beklenir.
+Kimlik doğrulama:
+- Yalnızca OAuth client JSON (`oauth_client_credentials.json` / `credentials.json`)
+  desteklenir; kişisel Google hesabı (My Drive) ile çalışır.
 
 Opsiyonel environment variable'lar:
-- SERVICE_ACCOUNT_FILE
+- GOOGLE_CREDENTIALS_FILE
 - GDRIVE_FOLDER_ID
+- GOOGLE_TOKEN_FILE
 - GAME_PROCESS_NAMES (varsayılan: Big Ambitions.exe,Big_Ambitions.exe,BigAmbitions.exe,UnityPlayer.exe)
 """
 
@@ -30,16 +31,19 @@ import csv
 import errno
 import json
 import os
+import queue
 import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from tkinter import filedialog, messagebox
 
 import psutil
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaInMemoryUpload
@@ -47,17 +51,15 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 # NOTE:
-# `drive.file` scope, service account kullanımında paylaşılan klasör metadata'sını
-# okurken 404/notFound benzeri yanıltıcı hatalara yol açabiliyor. Bu uygulama
-# hedef klasörü doğruladığı ve aynı klasörde create/update yaptığı için tam Drive
-# scope'u (`drive`) gerekiyor.
+# Bu uygulama hedef klasörü doğruladığı ve create/update yaptığı için
+# tam Drive scope'u (`drive`) kullanır.
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
 @dataclass
 class Config:
     savegames_root: Path
-    service_account_file: Path
+    credentials_file: Path
     drive_folder_id: Optional[str]
     process_names: tuple[str, ...]
     poll_seconds: int = 15
@@ -92,35 +94,42 @@ def normalize_drive_folder_id(raw_value: Optional[str]) -> Optional[str]:
 
 
 class DriveUploader:
-    """Service Account ile Drive create/update."""
+    """OAuth (kişisel Google hesabı) ile Drive create/update."""
 
-    def __init__(self, service_account_file: Path, folder_id: Optional[str] = None) -> None:
+    def __init__(self, credentials_file: Path, folder_id: Optional[str] = None) -> None:
         self.folder_id = folder_id
-        self.service_account_file = service_account_file
-        credentials = service_account.Credentials.from_service_account_file(
-            str(service_account_file), scopes=SCOPES
-        )
+        self.credentials_file = credentials_file
+        credentials = self._load_credentials(credentials_file)
         self.service = build("drive", "v3", credentials=credentials, cache_discovery=False)
 
-    def get_service_account_email(self) -> Optional[str]:
-        try:
-            payload = json.loads(self.service_account_file.read_text(encoding="utf-8"))
-            email = (payload.get("client_email") or "").strip()
-            return email or None
-        except Exception:
-            return None
+    @staticmethod
+    def _read_json(path: Path) -> dict:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
 
-    def _list_visible_shared_drives(self, page_size: int = 5) -> list[str]:
-        """Service Account'ın görebildiği Shared Drive adlarını döndürür."""
-        response = (
-            self.service.drives()
-            .list(pageSize=page_size, fields="drives(id,name)")
-            .execute()
-        )
-        return [
-            f"{drive.get('name', '(isimsiz)')} ({drive.get('id', 'id-yok')})"
-            for drive in response.get("drives", [])
-        ]
+    def _load_credentials(self, credentials_file: Path) -> Credentials:
+        payload = self._read_json(credentials_file)
+
+        oauth_config = payload.get("installed") or payload.get("web")
+        if not oauth_config:
+            raise RuntimeError(
+                "Desteklenmeyen credentials dosyası. Yalnızca OAuth client JSON kullanın."
+            )
+
+        token_file = Path(os.getenv("GOOGLE_TOKEN_FILE", str(credentials_file.with_name("token.json"))))
+        creds: Optional[Credentials] = None
+        if token_file.exists():
+            creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(str(credentials_file), SCOPES)
+                creds = flow.run_local_server(port=0)
+            token_file.write_text(creds.to_json(), encoding="utf-8")
+
+        return creds
 
     def describe_target_folder(self) -> str:
         if not self.folder_id:
@@ -137,41 +146,18 @@ class DriveUploader:
                 .execute()
             )
         except HttpError as exc:
-            base_error = explain_http_error(exc, self.folder_id, self.get_service_account_email())
-            if exc.resp is not None and exc.resp.status == 404:
-                try:
-                    drives = self._list_visible_shared_drives()
-                except Exception:
-                    drives = []
-
-                if drives:
-                    joined = "; ".join(drives)
-                    base_error += (
-                        " Görülebilen Shared Drive'lar: "
-                        f"{joined}. Eğer hedef klasör bunlardan farklıysa yanlış Service Account JSON kullanılıyor olabilir."
-                    )
-                else:
-                    base_error += (
-                        " Service Account bu credential ile hiçbir Shared Drive göremiyor olabilir "
-                        "(yanlış JSON dosyası, yanlış proje veya üyelik yok)."
-                    )
-            raise RuntimeError(base_error) from exc
+            raise RuntimeError(explain_http_error(exc, self.folder_id)) from exc
 
         folder_name = meta.get("name", "(isimsiz)")
         drive_id = meta.get("driveId")
         can_add_children = meta.get("capabilities", {}).get("canAddChildren")
         if can_add_children is False:
             raise RuntimeError(
-                "Drive klasörüne yazma yetkisi yok. Service Account'u (veya bağlı grubu) klasöre en az Editor yetkisiyle ekleyin."
+                "Drive klasörüne yazma yetkisi yok. Hesaba en az Editor yetkisi verin."
             )
 
         if not drive_id:
-            raise RuntimeError(
-                "Seçilen klasör bir Shared Drive içinde değil (My Drive klasörü görünüyor). "
-                "Service Account bu durumda yeni dosya oluştururken storageQuotaExceeded alır. "
-                "Çözüm: bir Shared Drive içinde klasör açın, bu klasör ID'sini GDRIVE_FOLDER_ID olarak verin "
-                "ve Service Account e-postasını Shared Drive'a Content manager/Manager olarak ekleyin."
-            )
+            return f"Doğrulandı: '{folder_name}' (My Drive klasörü)"
 
         return f"Doğrulandı: '{folder_name}' (driveId={drive_id})"
 
@@ -235,9 +221,15 @@ class DriveUploader:
 class TransactionsHandler(FileSystemEventHandler):
     """Sadece transactions.csv modified event'ini işler."""
 
-    def __init__(self, uploader: DriveUploader, settle_seconds: int = 10) -> None:
+    def __init__(
+        self,
+        uploader: DriveUploader,
+        settle_seconds: int = 10,
+        logger: Callable[[str], None] = print,
+    ) -> None:
         self.uploader = uploader
         self.settle_seconds = settle_seconds
+        self.logger = logger
         self._last_uploaded_day: Optional[str] = None
         self._last_uploaded_mtime: Optional[float] = None
 
@@ -250,33 +242,33 @@ class TransactionsHandler(FileSystemEventHandler):
             return
 
         try:
-            print(f"[WATCHDOG] Değişim algılandı: {changed_file}")
+            self.logger(f"[WATCHDOG] Değişim algılandı: {changed_file}")
             time.sleep(self.settle_seconds)
 
             # Aynı mtime için duplicate event'leri atla.
             file_mtime = changed_file.stat().st_mtime
             day_value = self._extract_day_from_csv(changed_file)
             if day_value is None:
-                print("[WARN] B sütunu (gün) okunamadı, upload atlandı.")
+                self.logger("[WARN] B sütunu (gün) okunamadı, upload atlandı.")
                 return
 
             if self._last_uploaded_day == day_value and self._last_uploaded_mtime == file_mtime:
-                print("[INFO] Duplicate event atlandı.")
+                self.logger("[INFO] Duplicate event atlandı.")
                 return
 
             drive_name = f"transactionsgun_{day_value}.csv"
             csv_bytes = self._read_csv_bytes_with_retry(changed_file)
             result = self.uploader.upload_or_update(csv_bytes, drive_name)
-            print(f"[DRIVE] {result}")
+            self.logger(f"[DRIVE] {result}")
             self._last_uploaded_day = day_value
             self._last_uploaded_mtime = file_mtime
         except HttpError as exc:
-            print(
+            self.logger(
                 "[ERROR] transactions.csv işleme hatası: "
-                f"{explain_http_error(exc, self.uploader.folder_id, self.uploader.get_service_account_email())}"
+                f"{explain_http_error(exc, self.uploader.folder_id)}"
             )
         except Exception as exc:
-            print(f"[ERROR] transactions.csv işleme hatası: {exc}")
+            self.logger(f"[ERROR] transactions.csv işleme hatası: {exc}")
 
     @staticmethod
     def _extract_day_from_csv(csv_file: Path) -> Optional[str]:
@@ -353,16 +345,20 @@ def build_default_config() -> Config:
     )
 
     script_dir = Path(__file__).resolve().parent
-    service_account_file = Path(
-        os.getenv("SERVICE_ACCOUNT_FILE", str(script_dir / "service_account_credentials.json"))
-    )
+    credentials_default = script_dir / "oauth_client_credentials.json"
+    if not credentials_default.exists():
+        alt_default = script_dir / "credentials.json"
+        if alt_default.exists():
+            credentials_default = alt_default
+
+    credentials_file = Path(os.getenv("GOOGLE_CREDENTIALS_FILE", str(credentials_default)))
     folder_id = normalize_drive_folder_id(os.getenv("GDRIVE_FOLDER_ID"))
     names = os.getenv("GAME_PROCESS_NAMES", "Big Ambitions.exe,Big_Ambitions.exe,BigAmbitions.exe,UnityPlayer.exe")
     process_names = tuple(n.strip() for n in names.split(",") if n.strip())
 
     return Config(
         savegames_root=savegames_root,
-        service_account_file=service_account_file,
+        credentials_file=credentials_file,
         drive_folder_id=folder_id,
         process_names=process_names,
     )
@@ -374,19 +370,14 @@ def preflight(config: Config) -> list[str]:
         errors.append("Bu script Windows path varsayımıyla yazıldı (os.name != 'nt').")
     if not config.savegames_root.exists():
         errors.append(f"SaveGames klasörü bulunamadı: {config.savegames_root}")
-    if not config.service_account_file.exists():
+    if not config.credentials_file.exists():
         errors.append(
-            f"Service account dosyası yok: {config.service_account_file} "
-            "(service_account_credentials.json ekleyin veya SERVICE_ACCOUNT_FILE ayarlayın)"
+            f"Google credentials dosyası yok: {config.credentials_file} "
+            "(oauth_client_credentials.json / credentials.json ekleyin veya GOOGLE_CREDENTIALS_FILE ayarlayın)"
         )
     if not config.process_names:
         errors.append("GAME_PROCESS_NAMES boş olamaz.")
-    if not config.drive_folder_id:
-        errors.append(
-            "Drive Folder ID gerekli. Service Account ile root'a yükleme (My Drive)"
-            " depolama kotası nedeniyle 403 verir."
-        )
-    elif len(config.drive_folder_id) < 10:
+    if config.drive_folder_id and len(config.drive_folder_id) < 10:
         errors.append(
             "Drive Folder ID geçersiz görünüyor. Yalnızca klasör ID'sini girin "
             "(örnek: 1AbCdEfGhIjKlMnOpQr). '.' veya kısa değerler kullanmayın."
@@ -397,7 +388,6 @@ def preflight(config: Config) -> list[str]:
 def explain_http_error(
     exc: HttpError,
     folder_id: Optional[str] = None,
-    service_account_email: Optional[str] = None,
 ) -> str:
     body = getattr(exc, "content", b"")
     try:
@@ -406,75 +396,68 @@ def explain_http_error(
         text = str(body)
 
     folder_hint = folder_id if folder_id else "<boş>"
-    sa_hint = service_account_email if service_account_email else "(json içinden okunamadı)"
-
     if exc.resp is not None and exc.resp.status == 403 and "storageQuotaExceeded" in text:
         return (
-            "Drive 403 storageQuotaExceeded: Service Account My Drive kotası olmadığı için "
-            "kişisel My Drive altına dosya oluşturamaz. Genellikle hedef klasör bir kullanıcının My Drive'ındadır. "
-            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}. "
-            "Çözüm: Shared Drive içinde bir klasör oluşturun, onun ID'sini verin ve Service Account'u "
-            f"('{sa_hint}') Shared Drive'a Content manager/Manager olarak ekleyin."
+            "Drive 403 storageQuotaExceeded: Kişisel Drive depolama kotanız dolu olabilir veya hedefe yazma izni yok. "
+            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}."
         )
 
     if exc.resp is not None and exc.resp.status == 404 and '"location": "fileId"' in text:
         return (
             "Drive 404 fileId notFound: Bu hata yalnızca 'ID yanlış' anlamına gelmez; "
-            "ID doğru olsa bile Service Account erişimi yoksa da 404 dönebilir. "
-            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}, Service Account={sa_hint}. "
+            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}. "
             "Kontrol edin: (1) URL'den gerçek klasör ID'si alındı mı, "
-            "(2) JSON'daki client_email gerçekten aynı klasöre/Shared Drive'a eklendi mi, "
-            "(3) yanlış service_account_credentials.json dosyası kullanılmıyor mu."
+            "(2) Google hesabınızın bu klasöre erişimi var mı."
         )
 
     return f"HTTP {getattr(exc.resp, 'status', 'unknown')}: {text}"
 
 
-def run_loop(config: Config) -> None:
-    uploader = DriveUploader(config.service_account_file, config.drive_folder_id)
+def run_loop(config: Config, logger: Callable[[str], None] = print) -> None:
+    uploader = DriveUploader(config.credentials_file, config.drive_folder_id)
 
     observer: Optional[Observer] = None
     watched_folder: Optional[Path] = None
 
     target_info = config.drive_folder_id if config.drive_folder_id else "<yok>"
-    print(f"[INFO] Drive hedef klasör ID: {target_info}")
+    logger(f"[INFO] Drive hedef klasör ID: {target_info}")
     try:
-        print(f"[INFO] Drive hedef kontrolü: {uploader.describe_target_folder()}")
+        logger(f"[INFO] Drive hedef kontrolü: {uploader.describe_target_folder()}")
     except Exception as exc:
-        print(f"[ERROR] Drive hedef doğrulama hatası: {exc}")
+        logger(f"[ERROR] Drive hedef doğrulama hatası: {exc}")
         raise SystemExit(1)
 
-    print("[INFO] Otomasyon başladı. Oyun süreci izleniyor...")
+    logger("[INFO] Otomasyon başladı. Oyun süreci izleniyor...")
     while True:
         try:
             running = is_game_running(config.process_names)
             if running:
                 latest_folder = find_latest_save_folder(config.savegames_root)
                 if latest_folder is None:
-                    print("[WARN] En güncel save klasörü bulunamadı.")
+                    logger("[WARN] En güncel save klasörü bulunamadı.")
                 else:
                     transactions = latest_folder / "transactions.csv"
                     if not transactions.exists():
-                        print(f"[WARN] transactions.csv yok: {transactions}")
+                        logger(f"[WARN] transactions.csv yok: {transactions}")
                     elif observer is None:
-                        handler = TransactionsHandler(uploader, config.file_settle_seconds)
+                        handler = TransactionsHandler(uploader, config.file_settle_seconds, logger)
                         observer = Observer()
                         observer.schedule(handler, str(latest_folder), recursive=False)
                         observer.start()
                         watched_folder = latest_folder
-                        print(f"[INFO] İzleme başladı: {latest_folder}")
+                        logger(f"[INFO] İzleme başladı: {latest_folder}")
                     elif watched_folder != latest_folder:
                         observer.stop()
                         observer.join(timeout=5)
-                        handler = TransactionsHandler(uploader, config.file_settle_seconds)
+                        handler = TransactionsHandler(uploader, config.file_settle_seconds, logger)
                         observer = Observer()
                         observer.schedule(handler, str(latest_folder), recursive=False)
                         observer.start()
                         watched_folder = latest_folder
-                        print(f"[INFO] İzlenen klasör güncellendi: {latest_folder}")
+                        logger(f"[INFO] İzlenen klasör güncellendi: {latest_folder}")
             else:
                 if observer is not None:
-                    print("[INFO] Oyun kapalı, izleme durduruldu.")
+                    logger("[INFO] Oyun kapalı, izleme durduruldu.")
                     observer.stop()
                     observer.join(timeout=5)
                     observer = None
@@ -482,16 +465,16 @@ def run_loop(config: Config) -> None:
 
             time.sleep(config.poll_seconds)
         except KeyboardInterrupt:
-            print("[INFO] Çıkış sinyali alındı.")
+            logger("[INFO] Çıkış sinyali alındı.")
             break
         except HttpError as exc:
-            print(
+            logger(
                 "[ERROR] Ana döngü hatası: "
-                f"{explain_http_error(exc, config.drive_folder_id, uploader.get_service_account_email())}"
+                f"{explain_http_error(exc, config.drive_folder_id)}"
             )
             time.sleep(config.poll_seconds)
         except Exception as exc:
-            print(f"[ERROR] Ana döngü hatası: {exc}")
+            logger(f"[ERROR] Ana döngü hatası: {exc}")
             time.sleep(config.poll_seconds)
 
     if observer is not None:
@@ -521,7 +504,7 @@ def launch_config_gui(default_config: Config) -> None:
     root.resizable(False, False)
 
     savegames_var = tk.StringVar(value=str(default_config.savegames_root))
-    service_account_var = tk.StringVar(value=str(default_config.service_account_file))
+    credentials_var = tk.StringVar(value=str(default_config.credentials_file))
     folder_id_var = tk.StringVar(value=default_config.drive_folder_id or "")
     process_var = tk.StringVar(value=",".join(default_config.process_names))
     poll_var = tk.StringVar(value=str(default_config.poll_seconds))
@@ -530,18 +513,49 @@ def launch_config_gui(default_config: Config) -> None:
 
     runner_thread: Optional[threading.Thread] = None
 
+    log_queue: queue.Queue[str] = queue.Queue()
+
+    def gui_logger(message: str) -> None:
+        print(message)
+        log_queue.put(message)
+
+    def pump_logs() -> None:
+        updated = False
+        while True:
+            try:
+                message = log_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            updated = True
+            if message.startswith("[ERROR]"):
+                status_var.set(f"Durum: Hata - {message}")
+            elif message.startswith("[WARN]"):
+                status_var.set(f"Durum: Uyarı - {message}")
+            else:
+                status_var.set(f"Durum: {message}")
+
+            log_text.configure(state="normal")
+            log_text.insert("end", message + "\n")
+            log_text.see("end")
+            log_text.configure(state="disabled")
+
+        if updated:
+            root.update_idletasks()
+        root.after(250, pump_logs)
+
     def browse_savegames() -> None:
         selected = filedialog.askdirectory(title="SaveGames klasörünü seç")
         if selected:
             savegames_var.set(selected)
 
-    def browse_service_account() -> None:
+    def browse_credentials_file() -> None:
         selected = filedialog.askopenfilename(
-            title="Service account JSON seç",
+            title="OAuth credentials JSON seç",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
         )
         if selected:
-            service_account_var.set(selected)
+            credentials_var.set(selected)
 
     def on_start() -> None:
         nonlocal runner_thread
@@ -556,7 +570,7 @@ def launch_config_gui(default_config: Config) -> None:
             )
             cfg = Config(
                 savegames_root=Path(savegames_var.get().strip()),
-                service_account_file=Path(service_account_var.get().strip()),
+                credentials_file=Path(credentials_var.get().strip()),
                 drive_folder_id=normalize_drive_folder_id(folder_id_var.get()),
                 process_names=process_names,
                 poll_seconds=poll_seconds,
@@ -572,7 +586,7 @@ def launch_config_gui(default_config: Config) -> None:
                 messagebox.showinfo("Bilgi", "İzleme zaten çalışıyor.")
                 return
 
-            runner_thread = threading.Thread(target=run_loop, args=(cfg,), daemon=True)
+            runner_thread = threading.Thread(target=run_loop, args=(cfg, gui_logger), daemon=True)
             runner_thread.start()
             status_var.set("Durum: İzleme başladı (pencere açık kalır)")
             start_button.config(state="disabled")
@@ -592,9 +606,9 @@ def launch_config_gui(default_config: Config) -> None:
     tk.Button(root, text="Seç", command=browse_savegames).grid(row=row, column=2, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text="Service Account JSON").grid(row=row, column=0, sticky="w", padx=8, pady=6)
-    tk.Entry(root, width=60, textvariable=service_account_var).grid(row=row, column=1, padx=8, pady=6)
-    tk.Button(root, text="Seç", command=browse_service_account).grid(row=row, column=2, padx=8, pady=6)
+    tk.Label(root, text="OAuth Credentials JSON").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Entry(root, width=60, textvariable=credentials_var).grid(row=row, column=1, padx=8, pady=6)
+    tk.Button(root, text="Seç", command=browse_credentials_file).grid(row=row, column=2, padx=8, pady=6)
 
     row += 1
     tk.Label(root, text="Drive Folder ID").grid(row=row, column=0, sticky="w", padx=8, pady=6)
@@ -617,6 +631,12 @@ def launch_config_gui(default_config: Config) -> None:
         row=row, column=0, columnspan=3, sticky="w", padx=8, pady=6
     )
 
+
+    row += 1
+    tk.Label(root, text="Canlı log").grid(row=row, column=0, sticky="nw", padx=8, pady=6)
+    log_text = tk.Text(root, width=82, height=10, state="disabled")
+    log_text.grid(row=row, column=1, columnspan=2, padx=8, pady=6, sticky="w")
+
     row += 1
     start_button = tk.Button(root, text="Başlat", command=on_start, width=18)
     start_button.grid(row=row, column=1, sticky="w", padx=8, pady=12)
@@ -624,6 +644,7 @@ def launch_config_gui(default_config: Config) -> None:
         row=row, column=1, sticky="e", padx=8, pady=12
     )
 
+    root.after(250, pump_logs)
     root.protocol("WM_DELETE_WINDOW", on_cancel)
     root.mainloop()
 
