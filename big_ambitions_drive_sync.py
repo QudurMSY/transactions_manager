@@ -971,69 +971,92 @@ class TransactionsHandler(FileSystemEventHandler):
         if changed_file.name.lower() != "transactions.csv":
             return
 
-        try:
-            self.logger(f"[WATCHDOG] Değişim algılandı: {changed_file}")
-            time.sleep(self.settle_seconds)
+        self.logger(f"[WATCHDOG] Değişim algılandı: {changed_file}")
+        time.sleep(self.settle_seconds)
 
-            # Aynı mtime için duplicate event'leri atla.
-            file_mtime = changed_file.stat().st_mtime
-            day_value = self._extract_day_from_csv(changed_file)
-            if day_value is None:
-                self.logger("[WARN] B sütunu (gün) okunamadı, upload atlandı.")
+        for attempt in range(1, 4):
+            try:
+                self._process_transactions_change(changed_file)
+                return
+            except HttpError as exc:
+                if attempt < 3 and is_transient_error(exc):
+                    backoff = 2 ** attempt
+                    self.logger(
+                        "[WARN] Geçici Drive/API hatası, tekrar denenecek "
+                        f"({attempt}/3): {explain_http_error(exc, self.uploader.folder_id)}"
+                    )
+                    time.sleep(backoff)
+                    continue
+                self.logger(
+                    "[ERROR] transactions.csv işleme hatası: "
+                    f"{explain_http_error(exc, self.uploader.folder_id)}"
+                )
+                return
+            except Exception as exc:
+                if attempt < 3 and is_transient_error(exc):
+                    backoff = 2 ** attempt
+                    self.logger(
+                        "[WARN] Geçici bağlantı hatası, tekrar denenecek "
+                        f"({attempt}/3): {exc}"
+                    )
+                    time.sleep(backoff)
+                    continue
+                self.logger(f"[ERROR] transactions.csv işleme hatası: {exc}")
                 return
 
-            if self._last_uploaded_day == day_value and self._last_uploaded_mtime == file_mtime:
-                self.logger("[INFO] Duplicate event atlandı.")
-                return
+    def _process_transactions_change(self, changed_file: Path) -> None:
+        # Aynı mtime için duplicate event'leri atla.
+        file_mtime = changed_file.stat().st_mtime
+        day_value = self._extract_day_from_csv(changed_file)
+        if day_value is None:
+            self.logger("[WARN] B sütunu (gün) okunamadı, upload atlandı.")
+            return
 
-            drive_name = f"transactionsgun_{day_value}.csv"
-            csv_bytes = self._read_csv_bytes_with_retry(changed_file)
-            day_number = int(day_value)
-            period = period_label(day_number)
+        if self._last_uploaded_day == day_value and self._last_uploaded_mtime == file_mtime:
+            self.logger("[INFO] Duplicate event atlandı.")
+            return
 
-            root_folder_id = self.uploader.ensure_folder("big ambitions", self.uploader.folder_id)
-            period_folder_id = self.uploader.ensure_folder(period, root_folder_id)
+        drive_name = f"transactionsgun_{day_value}.csv"
+        csv_bytes = self._read_csv_bytes_with_retry(changed_file)
+        day_number = int(day_value)
+        period = period_label(day_number)
 
-            result = self.uploader.upload_or_update_in_parent(
-                csv_bytes,
-                drive_name,
-                "text/csv",
-                period_folder_id,
-            )
-            self.logger(f"[DRIVE] {result}")
+        root_folder_id = self.uploader.ensure_folder("big ambitions", self.uploader.folder_id)
+        period_folder_id = self.uploader.ensure_folder(period, root_folder_id)
 
-            transactions = parse_transactions(changed_file)
-            period_start, period_end = period_bounds(day_number)
-            in_period = [
-                t for t in transactions if period_start <= t[0] <= period_end
-            ]
+        result = self.uploader.upload_or_update_in_parent(
+            csv_bytes,
+            drive_name,
+            "text/csv",
+            period_folder_id,
+        )
+        self.logger(f"[DRIVE] {result}")
 
-            daily_data_sheets, daily_charts = build_daily_sheet_payload(period, in_period)
-            daily_result = self.uploader.replace_google_sheet_with_charts(
-                "main",
-                period_folder_id,
-                daily_data_sheets,
-                daily_charts,
-            )
-            self.logger(f"[DRIVE] {daily_result}")
+        transactions = parse_transactions(changed_file)
+        period_start, period_end = period_bounds(day_number)
+        in_period = [
+            t for t in transactions if period_start <= t[0] <= period_end
+        ]
 
-            total_data_sheets, total_charts = build_period_totals_sheet_payload(transactions)
-            total_result = self.uploader.replace_google_sheet_with_charts(
-                "main_total",
-                root_folder_id,
-                total_data_sheets,
-                total_charts,
-            )
-            self.logger(f"[DRIVE] {total_result}")
-            self._last_uploaded_day = day_value
-            self._last_uploaded_mtime = file_mtime
-        except HttpError as exc:
-            self.logger(
-                "[ERROR] transactions.csv işleme hatası: "
-                f"{explain_http_error(exc, self.uploader.folder_id)}"
-            )
-        except Exception as exc:
-            self.logger(f"[ERROR] transactions.csv işleme hatası: {exc}")
+        daily_data_sheets, daily_charts = build_daily_sheet_payload(period, in_period)
+        daily_result = self.uploader.replace_google_sheet_with_charts(
+            "main",
+            period_folder_id,
+            daily_data_sheets,
+            daily_charts,
+        )
+        self.logger(f"[DRIVE] {daily_result}")
+
+        total_data_sheets, total_charts = build_period_totals_sheet_payload(transactions)
+        total_result = self.uploader.replace_google_sheet_with_charts(
+            "main_total",
+            root_folder_id,
+            total_data_sheets,
+            total_charts,
+        )
+        self.logger(f"[DRIVE] {total_result}")
+        self._last_uploaded_day = day_value
+        self._last_uploaded_mtime = file_mtime
 
     @staticmethod
     def _extract_day_from_csv(csv_file: Path) -> Optional[str]:
@@ -1076,6 +1099,30 @@ def is_game_running(process_names: tuple[str, ...]) -> bool:
         name = (proc.info.get("name") or "").lower()
         if name in expected:
             return True
+    return False
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    if isinstance(exc, HttpError):
+        status = getattr(exc.resp, "status", None)
+        return status in {408, 429, 500, 502, 503, 504}
+
+    if isinstance(exc, (TimeoutError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return True
+
+    if isinstance(exc, OSError):
+        winerror = getattr(exc, "winerror", None)
+        if winerror in {10053, 10054, 10060}:
+            return True
+        if exc.errno in {
+            errno.ECONNRESET,
+            errno.ECONNABORTED,
+            errno.ETIMEDOUT,
+            errno.EPIPE,
+            errno.ECONNREFUSED,
+        }:
+            return True
+
     return False
 
 
