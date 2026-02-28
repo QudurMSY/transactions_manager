@@ -71,8 +71,47 @@ class Config:
     credentials_file: Path
     drive_folder_id: Optional[str]
     process_names: tuple[str, ...]
+    language: str = "tr"
     poll_seconds: int = 15
     file_settle_seconds: int = 10
+
+
+MESSAGES = {
+    "tr": {
+        "unsupported_credentials": "Desteklenmeyen credentials dosyası. Yalnızca OAuth client JSON kullanın.",
+        "missing_drive_folder": "Drive hedef klasör ID verilmedi (GDRIVE_FOLDER_ID boş).",
+        "no_drive_permissions": "Drive klasörüne yazma yetkisi yok. Hesaba en az Editor yetkisi verin.",
+        "folder_verified_my_drive": "Doğrulandı: '{name}' (My Drive klasörü)",
+        "folder_verified_drive": "Doğrulandı: '{name}' (driveId={drive_id})",
+        "amount_axis": "Tutar",
+        "csv_read_error": "transactions.csv okunamadı",
+        "windows_only": "Bu script Windows path varsayımıyla yazıldı (os.name != 'nt').",
+        "savegames_missing": "SaveGames klasörü bulunamadı: {path}",
+        "credentials_missing": "Google credentials dosyası yok: {path} (oauth_client_credentials.json / credentials.json ekleyin veya GOOGLE_CREDENTIALS_FILE ayarlayın)",
+        "process_names_empty": "GAME_PROCESS_NAMES boş olamaz.",
+        "invalid_folder_id": "Drive Folder ID geçersiz görünüyor. Yalnızca klasör ID'sini girin (örnek: 1AbCdEfGhIjKlMnOpQr). '.' veya kısa değerler kullanmayın.",
+    },
+    "en": {
+        "unsupported_credentials": "Unsupported credentials file. Please use OAuth client JSON only.",
+        "missing_drive_folder": "No Drive target folder ID provided (GDRIVE_FOLDER_ID is empty).",
+        "no_drive_permissions": "No write permission for the Drive folder. Grant at least Editor access.",
+        "folder_verified_my_drive": "Verified: '{name}' (My Drive folder)",
+        "folder_verified_drive": "Verified: '{name}' (driveId={drive_id})",
+        "amount_axis": "Amount",
+        "csv_read_error": "Could not read transactions.csv",
+        "windows_only": "This script assumes Windows paths (os.name != 'nt').",
+        "savegames_missing": "SaveGames folder not found: {path}",
+        "credentials_missing": "Google credentials file missing: {path} (add oauth_client_credentials.json / credentials.json or set GOOGLE_CREDENTIALS_FILE)",
+        "process_names_empty": "GAME_PROCESS_NAMES cannot be empty.",
+        "invalid_folder_id": "Drive Folder ID appears invalid. Enter only the folder ID (example: 1AbCdEfGhIjKlMnOpQr). Avoid '.' or short values.",
+    },
+}
+
+
+def tr(lang: str, key: str, **kwargs: object) -> str:
+    selected = lang if lang in MESSAGES else "tr"
+    template = MESSAGES[selected].get(key) or MESSAGES["tr"].get(key) or key
+    return template.format(**kwargs)
 
 
 def normalize_drive_folder_id(raw_value: Optional[str]) -> Optional[str]:
@@ -105,9 +144,10 @@ def normalize_drive_folder_id(raw_value: Optional[str]) -> Optional[str]:
 class DriveUploader:
     """OAuth (kişisel Google hesabı) ile Drive create/update."""
 
-    def __init__(self, credentials_file: Path, folder_id: Optional[str] = None) -> None:
+    def __init__(self, credentials_file: Path, folder_id: Optional[str] = None, lang: str = "tr") -> None:
         self.folder_id = folder_id
         self.credentials_file = credentials_file
+        self.lang = lang
         credentials = self._load_credentials(credentials_file)
         self.service = build("drive", "v3", credentials=credentials, cache_discovery=False)
         self.sheets_service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
@@ -122,9 +162,7 @@ class DriveUploader:
 
         oauth_config = payload.get("installed") or payload.get("web")
         if not oauth_config:
-            raise RuntimeError(
-                "Desteklenmeyen credentials dosyası. Yalnızca OAuth client JSON kullanın."
-            )
+            raise RuntimeError(tr(self.lang, "unsupported_credentials"))
 
         token_file = Path(os.getenv("GOOGLE_TOKEN_FILE", str(credentials_file.with_name("token.json"))))
         creds: Optional[Credentials] = None
@@ -157,7 +195,7 @@ class DriveUploader:
 
     def describe_target_folder(self) -> str:
         if not self.folder_id:
-            return "Drive hedef klasör ID verilmedi (GDRIVE_FOLDER_ID boş)."
+            return tr(self.lang, "missing_drive_folder")
 
         try:
             meta = (
@@ -176,14 +214,12 @@ class DriveUploader:
         drive_id = meta.get("driveId")
         can_add_children = meta.get("capabilities", {}).get("canAddChildren")
         if can_add_children is False:
-            raise RuntimeError(
-                "Drive klasörüne yazma yetkisi yok. Hesaba en az Editor yetkisi verin."
-            )
+            raise RuntimeError(tr(self.lang, "no_drive_permissions"))
 
         if not drive_id:
-            return f"Doğrulandı: '{folder_name}' (My Drive klasörü)"
+            return tr(self.lang, "folder_verified_my_drive", name=folder_name)
 
-        return f"Doğrulandı: '{folder_name}' (driveId={drive_id})"
+        return tr(self.lang, "folder_verified_drive", name=folder_name, drive_id=drive_id)
 
     @property
     def _list_kwargs(self) -> dict[str, object]:
@@ -415,7 +451,7 @@ class DriveUploader:
                         "legendPosition": "RIGHT_LEGEND",
                         "axis": [
                             {"position": "BOTTOM_AXIS", "title": data_sheets[chart_sheet]["headers"][categories_col]},
-                            {"position": "LEFT_AXIS", "title": "Tutar"},
+                            {"position": "LEFT_AXIS", "title": tr(self.lang, "amount_axis")},
                         ],
                         "domains": [
                             {
@@ -1029,6 +1065,7 @@ class TransactionsHandler(FileSystemEventHandler):
         self.logger = logger
         self._last_uploaded_day: Optional[str] = None
         self._last_uploaded_mtime: Optional[float] = None
+        self.lang = uploader.lang
 
     def on_modified(self, event: FileSystemEvent) -> None:
         if event.is_directory:
@@ -1038,7 +1075,7 @@ class TransactionsHandler(FileSystemEventHandler):
         if changed_file.name.lower() != "transactions.csv":
             return
 
-        self.logger(f"[WATCHDOG] Değişim algılandı: {changed_file}")
+        self.logger(f"[WATCHDOG] Değişim algılandı / Change detected: {changed_file}")
         time.sleep(self.settle_seconds)
 
         for attempt in range(1, 4):
@@ -1049,26 +1086,26 @@ class TransactionsHandler(FileSystemEventHandler):
                 if attempt < 3 and is_transient_error(exc):
                     backoff = 2 ** attempt
                     self.logger(
-                        "[WARN] Geçici Drive/API hatası, tekrar denenecek "
-                        f"({attempt}/3): {explain_http_error(exc, self.uploader.folder_id)}"
+                        "[WARN] Geçici Drive/API hatası, tekrar denenecek / Temporary Drive/API error, retrying "
+                        f"({attempt}/3): {explain_http_error(exc, self.uploader.folder_id, self.lang)}"
                     )
                     time.sleep(backoff)
                     continue
                 self.logger(
-                    "[ERROR] transactions.csv işleme hatası: "
-                    f"{explain_http_error(exc, self.uploader.folder_id)}"
+                    "[ERROR] transactions.csv işleme hatası / transactions.csv processing error: "
+                    f"{explain_http_error(exc, self.uploader.folder_id, self.lang)}"
                 )
                 return
             except Exception as exc:
                 if attempt < 3 and is_transient_error(exc):
                     backoff = 2 ** attempt
                     self.logger(
-                        "[WARN] Geçici bağlantı hatası, tekrar denenecek "
+                        "[WARN] Geçici bağlantı hatası, tekrar denenecek / Temporary connection error, retrying "
                         f"({attempt}/3): {exc}"
                     )
                     time.sleep(backoff)
                     continue
-                self.logger(f"[ERROR] transactions.csv işleme hatası: {exc}")
+                self.logger(f"[ERROR] transactions.csv işleme hatası / transactions.csv processing error: {exc}")
                 return
 
     def _process_transactions_change(self, changed_file: Path) -> None:
@@ -1076,11 +1113,11 @@ class TransactionsHandler(FileSystemEventHandler):
         file_mtime = changed_file.stat().st_mtime
         day_value = self._extract_day_from_csv(changed_file)
         if day_value is None:
-            self.logger("[WARN] B sütunu (gün) okunamadı, upload atlandı.")
+            self.logger("[WARN] B sütunu (gün) okunamadı, upload atlandı. / Could not read day (column B), upload skipped.")
             return
 
         if self._last_uploaded_day == day_value and self._last_uploaded_mtime == file_mtime:
-            self.logger("[INFO] Duplicate event atlandı.")
+            self.logger("[INFO] Duplicate event atlandı. / Duplicate event skipped.")
             return
 
         drive_name = f"transactionsgun_{day_value}.csv"
@@ -1168,8 +1205,7 @@ class TransactionsHandler(FileSystemEventHandler):
 
         return None
 
-    @staticmethod
-    def _read_csv_bytes_with_retry(source_file: Path) -> bytes:
+    def _read_csv_bytes_with_retry(self, source_file: Path) -> bytes:
         for attempt in range(1, 6):
             try:
                 return source_file.read_bytes()
@@ -1180,7 +1216,7 @@ class TransactionsHandler(FileSystemEventHandler):
                     raise
                 time.sleep(0.4 * attempt)
 
-        raise RuntimeError("transactions.csv okunamadı")
+        raise RuntimeError(tr(self.lang, "csv_read_error"))
 
 
 def is_game_running(process_names: tuple[str, ...]) -> bool:
@@ -1257,39 +1293,36 @@ def build_default_config() -> Config:
     folder_id = normalize_drive_folder_id(os.getenv("GDRIVE_FOLDER_ID"))
     names = os.getenv("GAME_PROCESS_NAMES", "Big Ambitions.exe,Big_Ambitions.exe,BigAmbitions.exe,UnityPlayer.exe")
     process_names = tuple(n.strip() for n in names.split(",") if n.strip())
+    language = os.getenv("APP_LANG", "tr").strip().lower() or "tr"
 
     return Config(
         savegames_root=savegames_root,
         credentials_file=credentials_file,
         drive_folder_id=folder_id,
         process_names=process_names,
+        language=language,
     )
 
 
 def preflight(config: Config) -> list[str]:
     errors: list[str] = []
     if os.name != "nt":
-        errors.append("Bu script Windows path varsayımıyla yazıldı (os.name != 'nt').")
+        errors.append(tr(config.language, "windows_only"))
     if not config.savegames_root.exists():
-        errors.append(f"SaveGames klasörü bulunamadı: {config.savegames_root}")
+        errors.append(tr(config.language, "savegames_missing", path=config.savegames_root))
     if not config.credentials_file.exists():
-        errors.append(
-            f"Google credentials dosyası yok: {config.credentials_file} "
-            "(oauth_client_credentials.json / credentials.json ekleyin veya GOOGLE_CREDENTIALS_FILE ayarlayın)"
-        )
+        errors.append(tr(config.language, "credentials_missing", path=config.credentials_file))
     if not config.process_names:
-        errors.append("GAME_PROCESS_NAMES boş olamaz.")
+        errors.append(tr(config.language, "process_names_empty"))
     if config.drive_folder_id and len(config.drive_folder_id) < 10:
-        errors.append(
-            "Drive Folder ID geçersiz görünüyor. Yalnızca klasör ID'sini girin "
-            "(örnek: 1AbCdEfGhIjKlMnOpQr). '.' veya kısa değerler kullanmayın."
-        )
+        errors.append(tr(config.language, "invalid_folder_id"))
     return errors
 
 
 def explain_http_error(
     exc: HttpError,
     folder_id: Optional[str] = None,
+    lang: str = "tr",
 ) -> str:
     body = getattr(exc, "content", b"")
     try:
@@ -1316,38 +1349,38 @@ def explain_http_error(
 
 
 def run_loop(config: Config, logger: Callable[[str], None] = print) -> None:
-    uploader = DriveUploader(config.credentials_file, config.drive_folder_id)
+    uploader = DriveUploader(config.credentials_file, config.drive_folder_id, config.language)
 
     observer: Optional[Observer] = None
     watched_folder: Optional[Path] = None
 
-    target_info = config.drive_folder_id if config.drive_folder_id else "<yok>"
-    logger(f"[INFO] Drive hedef klasör ID: {target_info}")
+    target_info = config.drive_folder_id if config.drive_folder_id else "<yok>/<none>"
+    logger(f"[INFO] Drive hedef klasör ID / Drive target folder ID: {target_info}")
     try:
-        logger(f"[INFO] Drive hedef kontrolü: {uploader.describe_target_folder()}")
+        logger(f"[INFO] Drive hedef kontrolü / Drive target check: {uploader.describe_target_folder()}")
     except Exception as exc:
-        logger(f"[ERROR] Drive hedef doğrulama hatası: {exc}")
+        logger(f"[ERROR] Drive hedef doğrulama hatası / Drive target validation error: {exc}")
         raise SystemExit(1)
 
-    logger("[INFO] Otomasyon başladı. Oyun süreci izleniyor...")
+    logger("[INFO] Otomasyon başladı / Automation started. Oyun süreci izleniyor / Watching game process...")
     while True:
         try:
             running = is_game_running(config.process_names)
             if running:
                 latest_folder = find_latest_save_folder(config.savegames_root)
                 if latest_folder is None:
-                    logger("[WARN] En güncel save klasörü bulunamadı.")
+                    logger("[WARN] En güncel save klasörü bulunamadı. / Latest save folder not found.")
                 else:
                     transactions = latest_folder / "transactions.csv"
                     if not transactions.exists():
-                        logger(f"[WARN] transactions.csv yok: {transactions}")
+                        logger(f"[WARN] transactions.csv yok / missing: {transactions}")
                     elif observer is None:
                         handler = TransactionsHandler(uploader, config.file_settle_seconds, logger)
                         observer = Observer()
                         observer.schedule(handler, str(latest_folder), recursive=False)
                         observer.start()
                         watched_folder = latest_folder
-                        logger(f"[INFO] İzleme başladı: {latest_folder}")
+                        logger(f"[INFO] İzleme başladı / Monitoring started: {latest_folder}")
                     elif watched_folder != latest_folder:
                         observer.stop()
                         observer.join(timeout=5)
@@ -1356,10 +1389,10 @@ def run_loop(config: Config, logger: Callable[[str], None] = print) -> None:
                         observer.schedule(handler, str(latest_folder), recursive=False)
                         observer.start()
                         watched_folder = latest_folder
-                        logger(f"[INFO] İzlenen klasör güncellendi: {latest_folder}")
+                        logger(f"[INFO] İzlenen klasör güncellendi / Watched folder updated: {latest_folder}")
             else:
                 if observer is not None:
-                    logger("[INFO] Oyun kapalı, izleme durduruldu.")
+                    logger("[INFO] Oyun kapalı, izleme durduruldu. / Game closed, monitoring stopped.")
                     observer.stop()
                     observer.join(timeout=5)
                     observer = None
@@ -1367,16 +1400,16 @@ def run_loop(config: Config, logger: Callable[[str], None] = print) -> None:
 
             time.sleep(config.poll_seconds)
         except KeyboardInterrupt:
-            logger("[INFO] Çıkış sinyali alındı.")
+            logger("[INFO] Çıkış sinyali alındı. / Exit signal received.")
             break
         except HttpError as exc:
             logger(
-                "[ERROR] Ana döngü hatası: "
-                f"{explain_http_error(exc, config.drive_folder_id)}"
+                "[ERROR] Ana döngü hatası / Main loop error: "
+                f"{explain_http_error(exc, config.drive_folder_id, config.language)}"
             )
             time.sleep(config.poll_seconds)
         except Exception as exc:
-            logger(f"[ERROR] Ana döngü hatası: {exc}")
+            logger(f"[ERROR] Ana döngü hatası / Main loop error: {exc}")
             time.sleep(config.poll_seconds)
 
     if observer is not None:
@@ -1385,16 +1418,22 @@ def run_loop(config: Config, logger: Callable[[str], None] = print) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Big Ambitions -> Google Drive otomasyonu")
+    parser = argparse.ArgumentParser(description="Big Ambitions -> Google Drive otomasyonu / automation")
     parser.add_argument(
         "--doctor",
         action="store_true",
-        help="Sadece kurulum/doğrulama kontrolü yap ve çık.",
+        help="Sadece kurulum/doğrulama kontrolü yap ve çık. / Run setup checks only and exit.",
     )
     parser.add_argument(
         "--no-gui",
         action="store_true",
-        help="GUI açmadan doğrudan mevcut config ile çalıştır.",
+        help="GUI açmadan doğrudan mevcut config ile çalıştır. / Run directly with current config without GUI.",
+    )
+    parser.add_argument(
+        "--lang",
+        choices=["tr", "en"],
+        default=None,
+        help="Arayüz ve mesaj dili. / Interface and message language.",
     )
     return parser.parse_args()
 
@@ -1402,7 +1441,7 @@ def parse_args() -> argparse.Namespace:
 def launch_config_gui(default_config: Config) -> None:
     """Kullanıcıdan ayarları alır ve izlemeyi GUI açık kalırken arka planda başlatır."""
     root = tk.Tk()
-    root.title("Big Ambitions Drive Sync - Ayarlar")
+    root.title("Big Ambitions Drive Sync - Ayarlar / Settings")
     root.resizable(False, False)
 
     savegames_var = tk.StringVar(value=str(default_config.savegames_root))
@@ -1411,7 +1450,7 @@ def launch_config_gui(default_config: Config) -> None:
     process_var = tk.StringVar(value=",".join(default_config.process_names))
     poll_var = tk.StringVar(value=str(default_config.poll_seconds))
     settle_var = tk.StringVar(value=str(default_config.file_settle_seconds))
-    status_var = tk.StringVar(value="Durum: Hazır")
+    status_var = tk.StringVar(value="Durum / Status: Hazır / Ready")
 
     runner_thread: Optional[threading.Thread] = None
 
@@ -1431,11 +1470,11 @@ def launch_config_gui(default_config: Config) -> None:
 
             updated = True
             if message.startswith("[ERROR]"):
-                status_var.set(f"Durum: Hata - {message}")
+                status_var.set(f"Durum / Status: Hata / Error - {message}")
             elif message.startswith("[WARN]"):
-                status_var.set(f"Durum: Uyarı - {message}")
+                status_var.set(f"Durum / Status: Uyarı / Warning - {message}")
             else:
-                status_var.set(f"Durum: {message}")
+                status_var.set(f"Durum / Status: {message}")
 
             log_text.configure(state="normal")
             log_text.insert("end", message + "\n")
@@ -1447,13 +1486,13 @@ def launch_config_gui(default_config: Config) -> None:
         root.after(250, pump_logs)
 
     def browse_savegames() -> None:
-        selected = filedialog.askdirectory(title="SaveGames klasörünü seç")
+        selected = filedialog.askdirectory(title="SaveGames klasörünü seç / Select SaveGames folder")
         if selected:
             savegames_var.set(selected)
 
     def browse_credentials_file() -> None:
         selected = filedialog.askopenfilename(
-            title="OAuth credentials JSON seç",
+            title="OAuth credentials JSON seç / Select OAuth credentials JSON",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
         )
         if selected:
@@ -1465,7 +1504,7 @@ def launch_config_gui(default_config: Config) -> None:
             poll_seconds = int(poll_var.get().strip())
             settle_seconds = int(settle_var.get().strip())
             if poll_seconds <= 0 or settle_seconds <= 0:
-                raise ValueError("Süre değerleri 0'dan büyük olmalı")
+                raise ValueError("Süre değerleri 0'dan büyük olmalı / Durations must be greater than 0")
 
             process_names = tuple(
                 p.strip() for p in process_var.get().split(",") if p.strip()
@@ -1475,57 +1514,58 @@ def launch_config_gui(default_config: Config) -> None:
                 credentials_file=Path(credentials_var.get().strip()),
                 drive_folder_id=normalize_drive_folder_id(folder_id_var.get()),
                 process_names=process_names,
+                language=default_config.language,
                 poll_seconds=poll_seconds,
                 file_settle_seconds=settle_seconds,
             )
 
             errors = preflight(cfg)
             if errors:
-                messagebox.showerror("Ayar Hatası", "\n".join(errors))
+                messagebox.showerror("Ayar Hatası / Settings Error", "\n".join(errors))
                 return
 
             if runner_thread and runner_thread.is_alive():
-                messagebox.showinfo("Bilgi", "İzleme zaten çalışıyor.")
+                messagebox.showinfo("Bilgi / Info", "İzleme zaten çalışıyor. / Monitoring is already running.")
                 return
 
             runner_thread = threading.Thread(target=run_loop, args=(cfg, gui_logger), daemon=True)
             runner_thread.start()
-            status_var.set("Durum: İzleme başladı (pencere açık kalır)")
+            status_var.set("Durum / Status: İzleme başladı / Monitoring started (pencere açık kalır)")
             start_button.config(state="disabled")
             messagebox.showinfo(
-                "Başlatıldı",
-                "İzleme arka planda başladı. Bu pencere kapanmadı; durum takibi için açık kalabilir.",
+                "Başlatıldı / Started",
+                "İzleme arka planda başladı. Bu pencere kapanmadı; durum takibi için açık kalabilir. / Monitoring started in background. You can keep this window open for status updates.",
             )
         except ValueError as exc:
-            messagebox.showerror("Ayar Hatası", str(exc))
+            messagebox.showerror("Ayar Hatası / Settings Error", str(exc))
 
     def on_cancel() -> None:
         root.destroy()
 
     row = 0
-    tk.Label(root, text="SaveGames klasörü").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Label(root, text="SaveGames klasörü / SaveGames folder").grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=savegames_var).grid(row=row, column=1, padx=8, pady=6)
-    tk.Button(root, text="Seç", command=browse_savegames).grid(row=row, column=2, padx=8, pady=6)
+    tk.Button(root, text="Seç / Select", command=browse_savegames).grid(row=row, column=2, padx=8, pady=6)
 
     row += 1
     tk.Label(root, text="OAuth Credentials JSON").grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=credentials_var).grid(row=row, column=1, padx=8, pady=6)
-    tk.Button(root, text="Seç", command=browse_credentials_file).grid(row=row, column=2, padx=8, pady=6)
+    tk.Button(root, text="Seç / Select", command=browse_credentials_file).grid(row=row, column=2, padx=8, pady=6)
 
     row += 1
     tk.Label(root, text="Drive Folder ID").grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=folder_id_var).grid(row=row, column=1, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text="Process adları (virgülle)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Label(root, text="Process adları (virgülle) / Process names (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=process_var).grid(row=row, column=1, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text="Döngü bekleme sn").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Label(root, text="Döngü bekleme sn / Poll seconds").grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=20, textvariable=poll_var).grid(row=row, column=1, sticky="w", padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text="Dosya yazım bekleme sn").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Label(root, text="Dosya yazım bekleme sn / File settle seconds").grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=20, textvariable=settle_var).grid(row=row, column=1, sticky="w", padx=8, pady=6)
 
     row += 1
@@ -1535,14 +1575,14 @@ def launch_config_gui(default_config: Config) -> None:
 
 
     row += 1
-    tk.Label(root, text="Canlı log").grid(row=row, column=0, sticky="nw", padx=8, pady=6)
+    tk.Label(root, text="Canlı log / Live log").grid(row=row, column=0, sticky="nw", padx=8, pady=6)
     log_text = tk.Text(root, width=82, height=10, state="disabled")
     log_text.grid(row=row, column=1, columnspan=2, padx=8, pady=6, sticky="w")
 
     row += 1
-    start_button = tk.Button(root, text="Başlat", command=on_start, width=18)
+    start_button = tk.Button(root, text="Başlat / Start", command=on_start, width=18)
     start_button.grid(row=row, column=1, sticky="w", padx=8, pady=12)
-    tk.Button(root, text="Kapat", command=on_cancel, width=12).grid(
+    tk.Button(root, text="Kapat / Close", command=on_cancel, width=12).grid(
         row=row, column=1, sticky="e", padx=8, pady=12
     )
 
@@ -1554,17 +1594,19 @@ def launch_config_gui(default_config: Config) -> None:
 def main() -> None:
     args = parse_args()
     default_config = build_default_config()
+    if args.lang:
+        default_config.language = args.lang
 
     if args.no_gui:
         config = default_config
         errors = preflight(config)
         if errors:
-            print("[PRECHECK] Hazır değil. Tespit edilen sorunlar:")
+            print("[PRECHECK] Hazır değil / Not ready. Tespit edilen sorunlar / Detected issues:")
             for issue in errors:
                 print(f"  - {issue}")
             raise SystemExit(1)
 
-        print("[PRECHECK] Hazır: temel kontroller geçti.")
+        print("[PRECHECK] Hazır / Ready: temel kontroller geçti / base checks passed.")
         if args.doctor:
             return
 
