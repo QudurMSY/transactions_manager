@@ -32,13 +32,14 @@ import errno
 import json
 import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
 import zipfile
 from collections import defaultdict
 from dataclasses import dataclass
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Callable, Optional
 from tkinter import filedialog, messagebox
@@ -199,6 +200,54 @@ class DriveUploader:
 
     def _find_existing_file_id(self, file_name: str) -> Optional[str]:
         return self._find_existing_file_id_in_parent(file_name, self.folder_id)
+
+    def list_files_in_parent(
+        self,
+        parent_id: Optional[str],
+        name_prefix: Optional[str] = None,
+        name_suffix: Optional[str] = None,
+    ) -> list[dict[str, str]]:
+        query_parts = ["trashed = false"]
+        if parent_id:
+            query_parts.append(f"'{parent_id}' in parents")
+        if name_prefix:
+            safe_prefix = name_prefix.replace("'", "\\'")
+            query_parts.append(f"name contains '{safe_prefix}'")
+        query = " and ".join(query_parts)
+
+        files: list[dict[str, str]] = []
+        page_token: Optional[str] = None
+        while True:
+            response = (
+                self.service.files()
+                .list(
+                    q=query,
+                    spaces="drive",
+                    fields="nextPageToken,files(id,name)",
+                    pageSize=200,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                    corpora="allDrives",
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+            for item in response.get("files", []):
+                file_name = item.get("name", "")
+                if name_suffix and not file_name.endswith(name_suffix):
+                    continue
+                if name_prefix and not file_name.startswith(name_prefix):
+                    continue
+                files.append({"id": item["id"], "name": file_name})
+
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+        return files
+
+    def download_file_bytes(self, file_id: str) -> bytes:
+        return self.service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
 
     def _find_existing_file_id_in_parent(self, file_name: str, parent_id: Optional[str]) -> Optional[str]:
         safe_name = file_name.replace("'", "\\'")
@@ -469,28 +518,43 @@ def period_label(day: int) -> str:
     return f"{start}-{end}"
 
 
-def parse_transactions(csv_file: Path) -> list[tuple[int, str, float]]:
+def _parse_transactions_reader(reader: csv.reader) -> list[tuple[int, str, float]]:
     rows: list[tuple[int, str, float]] = []
-    with csv_file.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) < 4:
-                continue
-            day_raw = row[1].strip()
-            if not day_raw.isdigit():
-                continue
-            type_name = row[2].strip()
-            if not type_name:
-                continue
+    for row in reader:
+        if len(row) < 4:
+            continue
+        day_raw = row[1].strip()
+        if not day_raw.isdigit():
+            continue
+        type_name = row[2].strip()
+        if not type_name:
+            continue
 
-            amount_raw = row[3].strip()
-            try:
-                amount = parse_amount(amount_raw)
-            except ValueError:
-                continue
+        amount_raw = row[3].strip()
+        try:
+            amount = parse_amount(amount_raw)
+        except ValueError:
+            continue
 
-            rows.append((int(day_raw), type_name, amount))
+        rows.append((int(day_raw), type_name, amount))
     return rows
+
+
+def parse_transactions(csv_file: Path) -> list[tuple[int, str, float]]:
+    with csv_file.open("r", encoding="utf-8-sig", newline="") as f:
+        return _parse_transactions_reader(csv.reader(f))
+
+
+def parse_transactions_bytes(csv_bytes: bytes) -> list[tuple[int, str, float]]:
+    text = csv_bytes.decode("utf-8-sig", errors="replace")
+    return _parse_transactions_reader(csv.reader(StringIO(text)))
+
+
+def day_from_drive_csv_name(file_name: str) -> Optional[int]:
+    match = re.fullmatch(r"transactionsgun_(\d+)\.csv", file_name)
+    if not match:
+        return None
+    return int(match.group(1))
 
 
 def parse_amount(raw: str) -> float:
@@ -1035,13 +1099,10 @@ class TransactionsHandler(FileSystemEventHandler):
         )
         self.logger(f"[DRIVE] {result}")
 
+        period_transactions = self._load_period_transactions_from_drive(period_folder_id)
         transactions = parse_transactions(changed_file)
-        period_start, period_end = period_bounds(day_number)
-        in_period = [
-            t for t in transactions if period_start <= t[0] <= period_end
-        ]
 
-        daily_data_sheets, daily_charts = build_daily_sheet_payload(period, in_period)
+        daily_data_sheets, daily_charts = build_daily_sheet_payload(period, period_transactions)
         daily_result = self.uploader.replace_google_sheet_with_charts(
             "main",
             period_folder_id,
@@ -1060,6 +1121,32 @@ class TransactionsHandler(FileSystemEventHandler):
         self.logger(f"[DRIVE] {total_result}")
         self._last_uploaded_day = day_value
         self._last_uploaded_mtime = file_mtime
+
+    def _load_period_transactions_from_drive(self, period_folder_id: str) -> list[tuple[int, str, float]]:
+        files = self.uploader.list_files_in_parent(
+            period_folder_id,
+            name_prefix="transactionsgun_",
+            name_suffix=".csv",
+        )
+
+        files_with_day = [
+            (item, day_from_drive_csv_name(item["name"]))
+            for item in files
+        ]
+        ordered_files = sorted(
+            files_with_day,
+            key=lambda pair: (pair[1] is None, pair[1] or 0),
+        )
+
+        merged: list[tuple[int, str, float]] = []
+        for item, day in ordered_files:
+            if day is None:
+                continue
+
+            content = self.uploader.download_file_bytes(item["id"])
+            merged.extend(parse_transactions_bytes(content))
+
+        return merged
 
     @staticmethod
     def _extract_day_from_csv(csv_file: Path) -> Optional[str]:
