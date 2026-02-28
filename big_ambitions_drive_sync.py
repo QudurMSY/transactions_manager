@@ -668,27 +668,86 @@ def summarize_type_totals(transactions: list[tuple[int, str, float]]) -> tuple[l
     return income_rows, expense_rows
 
 
+def sheet_labels(lang: str) -> dict[str, object]:
+    if lang == "en":
+        return {
+            "summary_sheet": "summary",
+            "types_sheet": "types",
+            "day": "Day",
+            "period": "Period",
+            "income": "Income",
+            "expense": "Expense",
+            "net_income": "NetIncome",
+            "income_type": "IncomeType",
+            "income_total": "IncomeTotal",
+            "expense_type": "ExpenseType",
+            "expense_total": "ExpenseTotal",
+            "no_income": "NoIncome",
+            "no_expense": "NoExpense",
+            "daily_income_expense": "{period} Income-Expense",
+            "daily_net_income": "{period} Net Income",
+            "income_by_type": "{period} Income by Type",
+            "expense_by_type": "{period} Expense by Type",
+            "period_income_expense": "Income-Expense by Period",
+            "period_net_income": "Net Income by Period",
+            "income_by_type_total": "Income by Type",
+            "expense_by_type_total": "Expense by Type",
+        }
+
+    return {
+        "summary_sheet": "ozet",
+        "types_sheet": "turler",
+        "day": "Gun",
+        "period": "Periyot",
+        "income": "Kazanc",
+        "expense": "Harcama",
+        "net_income": "NetKazanc",
+        "income_type": "KazancTuru",
+        "income_total": "KazancToplam",
+        "expense_type": "HarcamaTuru",
+        "expense_total": "HarcamaToplam",
+        "no_income": "KazancYok",
+        "no_expense": "HarcamaYok",
+        "daily_income_expense": "{period} Kazanc-Harcama",
+        "daily_net_income": "{period} Net Kazanc",
+        "income_by_type": "{period} Turlere Gore Kazanc",
+        "expense_by_type": "{period} Turlere Gore Harcama",
+        "period_income_expense": "Periyot Bazli Kazanc-Harcama",
+        "period_net_income": "Periyot Bazli Net Kazanc",
+        "income_by_type_total": "Turlere Gore Kazanc",
+        "expense_by_type_total": "Turlere Gore Harcama",
+    }
+
+
 def build_daily_sheet_payload(
     period: str,
     transactions: list[tuple[int, str, float]],
+    lang: str = "tr",
 ) -> tuple[dict[str, dict[str, list[list[object]]]], list[dict[str, object]]]:
+    labels = sheet_labels(lang)
     metrics_rows = [list(row) for row in summarize_daily_metrics(transactions)]
     income_rows, expense_rows = summarize_type_totals(transactions)
 
     if not metrics_rows:
         metrics_rows = [[0, 0.0, 0.0, 0.0]]
     if not income_rows:
-        income_rows = [("KazancYok", 0.0)]
+        income_rows = [(str(labels["no_income"]), 0.0)]
     if not expense_rows:
-        expense_rows = [("HarcamaYok", 0.0)]
+        expense_rows = [(str(labels["no_expense"]), 0.0)]
+
+    summary_sheet = str(labels["summary_sheet"])
+    types_sheet = str(labels["types_sheet"])
+    income_label = str(labels["income"])
+    expense_label = str(labels["expense"])
+    net_income_label = str(labels["net_income"])
 
     data_sheets = {
-        "ozet": {
-            "headers": ["Gun", "Kazanc", "Harcama", "NetKazanc"],
+        summary_sheet: {
+            "headers": [str(labels["day"]), income_label, expense_label, net_income_label],
             "rows": metrics_rows,
         },
-        "turler": {
-            "headers": ["KazancTuru", "KazancToplam", "HarcamaTuru", "HarcamaToplam"],
+        types_sheet: {
+            "headers": [str(labels["income_type"]), str(labels["income_total"]), str(labels["expense_type"]), str(labels["expense_total"])],
             "rows": [
                 [income_rows[i][0] if i < len(income_rows) else "", income_rows[i][1] if i < len(income_rows) else "",
                  expense_rows[i][0] if i < len(expense_rows) else "", expense_rows[i][1] if i < len(expense_rows) else ""]
@@ -697,34 +756,42 @@ def build_daily_sheet_payload(
         },
     }
     charts = [
-        {"type": "bar", "title": f"{period} Kazanc-Harcama", "sheet": "ozet", "cats_col": 1, "series": [(2, "Kazanc"), (3, "Harcama")]},
-        {"type": "line", "title": f"{period} Net Kazanc", "sheet": "ozet", "cats_col": 1, "series": [(4, "NetKazanc")]},
-        {"type": "pie", "title": f"{period} Turlere Gore Kazanc", "sheet": "turler", "cats_col": 1, "series": [(2, "Kazanc")]},
-        {"type": "pie", "title": f"{period} Turlere Gore Harcama", "sheet": "turler", "cats_col": 3, "series": [(4, "Harcama")]},
+        {"type": "bar", "title": str(labels["daily_income_expense"]).format(period=period), "sheet": summary_sheet, "cats_col": 1, "series": [(2, income_label), (3, expense_label)]},
+        {"type": "line", "title": str(labels["daily_net_income"]).format(period=period), "sheet": summary_sheet, "cats_col": 1, "series": [(4, net_income_label)]},
+        {"type": "pie", "title": str(labels["income_by_type"]).format(period=period), "sheet": types_sheet, "cats_col": 1, "series": [(2, income_label)]},
+        {"type": "pie", "title": str(labels["expense_by_type"]).format(period=period), "sheet": types_sheet, "cats_col": 3, "series": [(4, expense_label)]},
     ]
     return data_sheets, charts
 
 
 def build_period_totals_sheet_payload(
     transactions: list[tuple[int, str, float]],
+    lang: str = "tr",
 ) -> tuple[dict[str, dict[str, list[list[object]]]], list[dict[str, object]]]:
+    labels = sheet_labels(lang)
     metrics_rows = [list(row) for row in summarize_period_metrics(transactions)]
     income_rows, expense_rows = summarize_type_totals(transactions)
 
     if not metrics_rows:
         metrics_rows = [["1-60", 0.0, 0.0, 0.0]]
     if not income_rows:
-        income_rows = [("KazancYok", 0.0)]
+        income_rows = [(str(labels["no_income"]), 0.0)]
     if not expense_rows:
-        expense_rows = [("HarcamaYok", 0.0)]
+        expense_rows = [(str(labels["no_expense"]), 0.0)]
+
+    summary_sheet = str(labels["summary_sheet"])
+    types_sheet = str(labels["types_sheet"])
+    income_label = str(labels["income"])
+    expense_label = str(labels["expense"])
+    net_income_label = str(labels["net_income"])
 
     data_sheets = {
-        "ozet": {
-            "headers": ["Periyot", "Kazanc", "Harcama", "NetKazanc"],
+        summary_sheet: {
+            "headers": [str(labels["period"]), income_label, expense_label, net_income_label],
             "rows": metrics_rows,
         },
-        "turler": {
-            "headers": ["KazancTuru", "KazancToplam", "HarcamaTuru", "HarcamaToplam"],
+        types_sheet: {
+            "headers": [str(labels["income_type"]), str(labels["income_total"]), str(labels["expense_type"]), str(labels["expense_total"])],
             "rows": [
                 [income_rows[i][0] if i < len(income_rows) else "", income_rows[i][1] if i < len(income_rows) else "",
                  expense_rows[i][0] if i < len(expense_rows) else "", expense_rows[i][1] if i < len(expense_rows) else ""]
@@ -733,10 +800,10 @@ def build_period_totals_sheet_payload(
         },
     }
     charts = [
-        {"type": "bar", "title": "Periyot Bazli Kazanc-Harcama", "sheet": "ozet", "cats_col": 1, "series": [(2, "Kazanc"), (3, "Harcama")]},
-        {"type": "line", "title": "Periyot Bazli Net Kazanc", "sheet": "ozet", "cats_col": 1, "series": [(4, "NetKazanc")]},
-        {"type": "pie", "title": "Turlere Gore Kazanc", "sheet": "turler", "cats_col": 1, "series": [(2, "Kazanc")]},
-        {"type": "pie", "title": "Turlere Gore Harcama", "sheet": "turler", "cats_col": 3, "series": [(4, "Harcama")]},
+        {"type": "bar", "title": str(labels["period_income_expense"]), "sheet": summary_sheet, "cats_col": 1, "series": [(2, income_label), (3, expense_label)]},
+        {"type": "line", "title": str(labels["period_net_income"]), "sheet": summary_sheet, "cats_col": 1, "series": [(4, net_income_label)]},
+        {"type": "pie", "title": str(labels["income_by_type_total"]), "sheet": types_sheet, "cats_col": 1, "series": [(2, income_label)]},
+        {"type": "pie", "title": str(labels["expense_by_type_total"]), "sheet": types_sheet, "cats_col": 3, "series": [(4, expense_label)]},
     ]
     return data_sheets, charts
 
@@ -1139,7 +1206,7 @@ class TransactionsHandler(FileSystemEventHandler):
         period_transactions = self._load_period_transactions_from_drive(period_folder_id)
         transactions = parse_transactions(changed_file)
 
-        daily_data_sheets, daily_charts = build_daily_sheet_payload(period, period_transactions)
+        daily_data_sheets, daily_charts = build_daily_sheet_payload(period, period_transactions, self.lang)
         daily_result = self.uploader.replace_google_sheet_with_charts(
             "main",
             period_folder_id,
@@ -1148,7 +1215,7 @@ class TransactionsHandler(FileSystemEventHandler):
         )
         self.logger(f"[DRIVE] {daily_result}")
 
-        total_data_sheets, total_charts = build_period_totals_sheet_payload(transactions)
+        total_data_sheets, total_charts = build_period_totals_sheet_payload(transactions, self.lang)
         total_result = self.uploader.replace_google_sheet_with_charts(
             "main_total",
             root_folder_id,
@@ -1451,6 +1518,7 @@ def launch_config_gui(default_config: Config) -> None:
     poll_var = tk.StringVar(value=str(default_config.poll_seconds))
     settle_var = tk.StringVar(value=str(default_config.file_settle_seconds))
     status_var = tk.StringVar(value="Durum / Status: Hazır / Ready")
+    lang_var = tk.StringVar(value=default_config.language if default_config.language in {"tr", "en"} else "tr")
 
     runner_thread: Optional[threading.Thread] = None
 
@@ -1498,6 +1566,36 @@ def launch_config_gui(default_config: Config) -> None:
         if selected:
             credentials_var.set(selected)
 
+    def open_language_guide() -> None:
+        guide = tk.Toplevel(root)
+        guide.title("Dil Rehberi / Language Guide")
+        guide.resizable(False, False)
+
+        tk.Label(
+            guide,
+            text=(
+                "Uygulama dili ve üretilen Google Sheet/Excel başlıkları bu seçimle güncellenir.\n"
+                "App language and generated Google Sheet/Excel titles follow this selection."
+            ),
+            justify="left",
+            wraplength=420,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 8))
+
+        tk.Label(guide, text="Dil / Language").grid(row=1, column=0, sticky="w", padx=10, pady=6)
+        tk.OptionMenu(guide, lang_var, "tr", "en").grid(row=1, column=1, sticky="w", padx=10, pady=6)
+
+        def save_language() -> None:
+            chosen = lang_var.get() if lang_var.get() in {"tr", "en"} else "tr"
+            lang_var.set(chosen)
+            default_config.language = chosen
+            status_var.set(
+                "Durum / Status: Dil güncellendi ({}). İzleme başladığında uygulanacak. / Language updated ({}). Applied when monitoring starts.".format(chosen, chosen)
+            )
+            guide.destroy()
+
+        tk.Button(guide, text="Kaydet / Save", command=save_language, width=14).grid(row=2, column=0, padx=10, pady=(6, 10), sticky="w")
+        tk.Button(guide, text="Kapat / Close", command=guide.destroy, width=14).grid(row=2, column=1, padx=10, pady=(6, 10), sticky="e")
+
     def on_start() -> None:
         nonlocal runner_thread
         try:
@@ -1514,7 +1612,7 @@ def launch_config_gui(default_config: Config) -> None:
                 credentials_file=Path(credentials_var.get().strip()),
                 drive_folder_id=normalize_drive_folder_id(folder_id_var.get()),
                 process_names=process_names,
-                language=default_config.language,
+                language=lang_var.get() if lang_var.get() in {"tr", "en"} else default_config.language,
                 poll_seconds=poll_seconds,
                 file_settle_seconds=settle_seconds,
             )
@@ -1580,6 +1678,9 @@ def launch_config_gui(default_config: Config) -> None:
     log_text.grid(row=row, column=1, columnspan=2, padx=8, pady=6, sticky="w")
 
     row += 1
+    tk.Button(root, text="Dil Rehberi / Language Guide", command=open_language_guide, width=26).grid(
+        row=row, column=0, sticky="w", padx=8, pady=12
+    )
     start_button = tk.Button(root, text="Başlat / Start", command=on_start, width=18)
     start_button.grid(row=row, column=1, sticky="w", padx=8, pady=12)
     tk.Button(root, text="Kapat / Close", command=on_cancel, width=12).grid(
