@@ -114,6 +114,10 @@ def tr(lang: str, key: str, **kwargs: object) -> str:
     return template.format(**kwargs)
 
 
+def choose_text(lang: str, tr_text: str, en_text: str) -> str:
+    return tr_text if lang == "tr" else en_text
+
+
 def normalize_drive_folder_id(raw_value: Optional[str]) -> Optional[str]:
     """Drive folder ID değerini normalize eder.
 
@@ -1142,7 +1146,13 @@ class TransactionsHandler(FileSystemEventHandler):
         if changed_file.name.lower() != "transactions.csv":
             return
 
-        self.logger(f"[WATCHDOG] Değişim algılandı / Change detected: {changed_file}")
+        self.logger(
+            choose_text(
+                self.lang,
+                f"[WATCHDOG] Değişim algılandı: {changed_file}",
+                f"[WATCHDOG] Change detected: {changed_file}",
+            )
+        )
         time.sleep(self.settle_seconds)
 
         for attempt in range(1, 4):
@@ -1153,26 +1163,44 @@ class TransactionsHandler(FileSystemEventHandler):
                 if attempt < 3 and is_transient_error(exc):
                     backoff = 2 ** attempt
                     self.logger(
-                        "[WARN] Geçici Drive/API hatası, tekrar denenecek / Temporary Drive/API error, retrying "
-                        f"({attempt}/3): {explain_http_error(exc, self.uploader.folder_id, self.lang)}"
+                        choose_text(
+                            self.lang,
+                            "[WARN] Geçici Drive/API hatası, tekrar denenecek ",
+                            "[WARN] Temporary Drive/API error, retrying ",
+                        )
+                        + f"({attempt}/3): {explain_http_error(exc, self.uploader.folder_id, self.lang)}"
                     )
                     time.sleep(backoff)
                     continue
                 self.logger(
-                    "[ERROR] transactions.csv işleme hatası / transactions.csv processing error: "
-                    f"{explain_http_error(exc, self.uploader.folder_id, self.lang)}"
+                    choose_text(
+                        self.lang,
+                        "[ERROR] transactions.csv işleme hatası: ",
+                        "[ERROR] transactions.csv processing error: ",
+                    )
+                    + f"{explain_http_error(exc, self.uploader.folder_id, self.lang)}"
                 )
                 return
             except Exception as exc:
                 if attempt < 3 and is_transient_error(exc):
                     backoff = 2 ** attempt
                     self.logger(
-                        "[WARN] Geçici bağlantı hatası, tekrar denenecek / Temporary connection error, retrying "
-                        f"({attempt}/3): {exc}"
+                        choose_text(
+                            self.lang,
+                            "[WARN] Geçici bağlantı hatası, tekrar denenecek ",
+                            "[WARN] Temporary connection error, retrying ",
+                        )
+                        + f"({attempt}/3): {exc}"
                     )
                     time.sleep(backoff)
                     continue
-                self.logger(f"[ERROR] transactions.csv işleme hatası / transactions.csv processing error: {exc}")
+                self.logger(
+                    choose_text(
+                        self.lang,
+                        f"[ERROR] transactions.csv işleme hatası: {exc}",
+                        f"[ERROR] transactions.csv processing error: {exc}",
+                    )
+                )
                 return
 
     def _process_transactions_change(self, changed_file: Path) -> None:
@@ -1180,11 +1208,23 @@ class TransactionsHandler(FileSystemEventHandler):
         file_mtime = changed_file.stat().st_mtime
         day_value = self._extract_day_from_csv(changed_file)
         if day_value is None:
-            self.logger("[WARN] B sütunu (gün) okunamadı, upload atlandı. / Could not read day (column B), upload skipped.")
+            self.logger(
+                choose_text(
+                    self.lang,
+                    "[WARN] B sütunu (gün) okunamadı, yükleme atlandı.",
+                    "[WARN] Could not read day (column B), upload skipped.",
+                )
+            )
             return
 
         if self._last_uploaded_day == day_value and self._last_uploaded_mtime == file_mtime:
-            self.logger("[INFO] Duplicate event atlandı. / Duplicate event skipped.")
+            self.logger(
+                choose_text(
+                    self.lang,
+                    "[INFO] Yinelenen olay atlandı.",
+                    "[INFO] Duplicate event skipped.",
+                )
+            )
             return
 
         drive_name = f"transactionsgun_{day_value}.csv"
@@ -1397,19 +1437,27 @@ def explain_http_error(
     except Exception:
         text = str(body)
 
-    folder_hint = folder_id if folder_id else "<boş>"
+    folder_hint = folder_id if folder_id else choose_text(lang, "<boş>", "<empty>")
     if exc.resp is not None and exc.resp.status == 403 and "storageQuotaExceeded" in text:
-        return (
+        return choose_text(
+            lang,
             "Drive 403 storageQuotaExceeded: Kişisel Drive depolama kotanız dolu olabilir veya hedefe yazma izni yok. "
-            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}."
+            f"Mevcut GDRIVE_FOLDER_ID={folder_hint}.",
+            "Drive 403 storageQuotaExceeded: Your personal Drive quota may be full or you may not have write access "
+            f"to the target. Current GDRIVE_FOLDER_ID={folder_hint}.",
         )
 
     if exc.resp is not None and exc.resp.status == 404 and '"location": "fileId"' in text:
-        return (
+        return choose_text(
+            lang,
             "Drive 404 fileId notFound: Bu hata yalnızca 'ID yanlış' anlamına gelmez; "
             f"Mevcut GDRIVE_FOLDER_ID={folder_hint}. "
             "Kontrol edin: (1) URL'den gerçek klasör ID'si alındı mı, "
-            "(2) Google hesabınızın bu klasöre erişimi var mı."
+            "(2) Google hesabınızın bu klasöre erişimi var mı.",
+            "Drive 404 fileId notFound: This does not only mean 'invalid ID'; "
+            f"current GDRIVE_FOLDER_ID={folder_hint}. "
+            "Check: (1) whether you copied the real folder ID from the URL, "
+            "(2) whether your Google account has access to this folder.",
         )
 
     return f"HTTP {getattr(exc.resp, 'status', 'unknown')}: {text}"
@@ -1421,33 +1469,33 @@ def run_loop(config: Config, logger: Callable[[str], None] = print) -> None:
     observer: Optional[Observer] = None
     watched_folder: Optional[Path] = None
 
-    target_info = config.drive_folder_id if config.drive_folder_id else "<yok>/<none>"
-    logger(f"[INFO] Drive hedef klasör ID / Drive target folder ID: {target_info}")
+    target_info = config.drive_folder_id if config.drive_folder_id else choose_text(config.language, "<yok>", "<none>")
+    logger(choose_text(config.language, f"[INFO] Drive hedef klasör ID: {target_info}", f"[INFO] Drive target folder ID: {target_info}"))
     try:
-        logger(f"[INFO] Drive hedef kontrolü / Drive target check: {uploader.describe_target_folder()}")
+        logger(choose_text(config.language, f"[INFO] Drive hedef kontrolü: {uploader.describe_target_folder()}", f"[INFO] Drive target check: {uploader.describe_target_folder()}"))
     except Exception as exc:
-        logger(f"[ERROR] Drive hedef doğrulama hatası / Drive target validation error: {exc}")
+        logger(choose_text(config.language, f"[ERROR] Drive hedef doğrulama hatası: {exc}", f"[ERROR] Drive target validation error: {exc}"))
         raise SystemExit(1)
 
-    logger("[INFO] Otomasyon başladı / Automation started. Oyun süreci izleniyor / Watching game process...")
+    logger(choose_text(config.language, "[INFO] Otomasyon başladı. Oyun süreci izleniyor...", "[INFO] Automation started. Watching game process..."))
     while True:
         try:
             running = is_game_running(config.process_names)
             if running:
                 latest_folder = find_latest_save_folder(config.savegames_root)
                 if latest_folder is None:
-                    logger("[WARN] En güncel save klasörü bulunamadı. / Latest save folder not found.")
+                    logger(choose_text(config.language, "[WARN] En güncel save klasörü bulunamadı.", "[WARN] Latest save folder not found."))
                 else:
                     transactions = latest_folder / "transactions.csv"
                     if not transactions.exists():
-                        logger(f"[WARN] transactions.csv yok / missing: {transactions}")
+                        logger(choose_text(config.language, f"[WARN] transactions.csv yok: {transactions}", f"[WARN] transactions.csv missing: {transactions}"))
                     elif observer is None:
                         handler = TransactionsHandler(uploader, config.file_settle_seconds, logger)
                         observer = Observer()
                         observer.schedule(handler, str(latest_folder), recursive=False)
                         observer.start()
                         watched_folder = latest_folder
-                        logger(f"[INFO] İzleme başladı / Monitoring started: {latest_folder}")
+                        logger(choose_text(config.language, f"[INFO] İzleme başladı: {latest_folder}", f"[INFO] Monitoring started: {latest_folder}"))
                     elif watched_folder != latest_folder:
                         observer.stop()
                         observer.join(timeout=5)
@@ -1456,10 +1504,10 @@ def run_loop(config: Config, logger: Callable[[str], None] = print) -> None:
                         observer.schedule(handler, str(latest_folder), recursive=False)
                         observer.start()
                         watched_folder = latest_folder
-                        logger(f"[INFO] İzlenen klasör güncellendi / Watched folder updated: {latest_folder}")
+                        logger(choose_text(config.language, f"[INFO] İzlenen klasör güncellendi: {latest_folder}", f"[INFO] Watched folder updated: {latest_folder}"))
             else:
                 if observer is not None:
-                    logger("[INFO] Oyun kapalı, izleme durduruldu. / Game closed, monitoring stopped.")
+                    logger(choose_text(config.language, "[INFO] Oyun kapalı, izleme durduruldu.", "[INFO] Game closed, monitoring stopped."))
                     observer.stop()
                     observer.join(timeout=5)
                     observer = None
@@ -1467,16 +1515,16 @@ def run_loop(config: Config, logger: Callable[[str], None] = print) -> None:
 
             time.sleep(config.poll_seconds)
         except KeyboardInterrupt:
-            logger("[INFO] Çıkış sinyali alındı. / Exit signal received.")
+            logger(choose_text(config.language, "[INFO] Çıkış sinyali alındı.", "[INFO] Exit signal received."))
             break
         except HttpError as exc:
             logger(
-                "[ERROR] Ana döngü hatası / Main loop error: "
-                f"{explain_http_error(exc, config.drive_folder_id, config.language)}"
+                choose_text(config.language, "[ERROR] Ana döngü hatası: ", "[ERROR] Main loop error: ")
+                + f"{explain_http_error(exc, config.drive_folder_id, config.language)}"
             )
             time.sleep(config.poll_seconds)
         except Exception as exc:
-            logger(f"[ERROR] Ana döngü hatası / Main loop error: {exc}")
+            logger(choose_text(config.language, f"[ERROR] Ana döngü hatası: {exc}", f"[ERROR] Main loop error: {exc}"))
             time.sleep(config.poll_seconds)
 
     if observer is not None:
@@ -1485,22 +1533,22 @@ def run_loop(config: Config, logger: Callable[[str], None] = print) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Big Ambitions -> Google Drive otomasyonu / automation")
+    parser = argparse.ArgumentParser(description="Big Ambitions -> Google Drive automation")
     parser.add_argument(
         "--doctor",
         action="store_true",
-        help="Sadece kurulum/doğrulama kontrolü yap ve çık. / Run setup checks only and exit.",
+        help="Run setup checks only and exit.",
     )
     parser.add_argument(
         "--no-gui",
         action="store_true",
-        help="GUI açmadan doğrudan mevcut config ile çalıştır. / Run directly with current config without GUI.",
+        help="Run directly with current config without GUI.",
     )
     parser.add_argument(
         "--lang",
         choices=["tr", "en"],
         default=None,
-        help="Arayüz ve mesaj dili. / Interface and message language.",
+        help="Interface and message language.",
     )
     return parser.parse_args()
 
@@ -1536,10 +1584,12 @@ def launch_config_gui(default_config: Config) -> None:
             "select": "Seç",
             "start": "Başlat",
             "close": "Kapat",
-            "language_guide": "Dil Rehberi",
+            "language_guide": "🌐 Language / Dil",
             "guide_title": "Dil Rehberi",
             "guide_description": "Uygulama dili ve üretilen Google Sheet/Excel başlıkları bu seçimle güncellenir.",
             "language_label": "Dil",
+            "language_option_tr": "Türkçe",
+            "language_option_en": "İngilizce",
             "save": "Kaydet",
             "status_language_saved": "Durum: Dil güncellendi ({lang}). İzleme başladığında uygulanacak.",
             "settings_error": "Ayar Hatası",
@@ -1567,10 +1617,12 @@ def launch_config_gui(default_config: Config) -> None:
             "select": "Select",
             "start": "Start",
             "close": "Close",
-            "language_guide": "Language Guide",
+            "language_guide": "🌐 Language / Dil",
             "guide_title": "Language Guide",
             "guide_description": "App language and generated Google Sheet/Excel titles follow this selection.",
             "language_label": "Language",
+            "language_option_tr": "Turkish",
+            "language_option_en": "English",
             "save": "Save",
             "status_language_saved": "Status: Language updated ({lang}). Applied when monitoring starts.",
             "settings_error": "Settings Error",
@@ -1638,33 +1690,98 @@ def launch_config_gui(default_config: Config) -> None:
         if selected:
             credentials_var.set(selected)
 
+    labels: dict[str, tk.Label] = {}
+    buttons: dict[str, tk.Button] = {}
+    guide_widgets: dict[str, object] = {}
+
+    def update_main_texts() -> None:
+        root.title(gt("window_title"))
+        labels["savegames"].config(text=gt("savegames_label"))
+        labels["oauth"].config(text=gt("oauth_label"))
+        labels["folder_id"].config(text=gt("folder_id_label"))
+        labels["process"].config(text=gt("process_label"))
+        labels["poll"].config(text=gt("poll_label"))
+        labels["settle"].config(text=gt("settle_label"))
+        labels["live_log"].config(text=gt("live_log"))
+
+        buttons["select_savegames"].config(text=gt("select"))
+        buttons["select_oauth"].config(text=gt("select"))
+        buttons["language_guide"].config(text=gt("language_guide"))
+        if not (runner_thread and runner_thread.is_alive()):
+            buttons["start"].config(text=gt("start"))
+        buttons["close"].config(text=gt("close"))
+
+    def update_guide_texts() -> None:
+        if not guide_widgets:
+            return
+        window = guide_widgets["window"]
+        if not isinstance(window, tk.Toplevel) or not window.winfo_exists():
+            guide_widgets.clear()
+            return
+
+        window.title(gt("guide_title"))
+        guide_widgets["description"].config(text=gt("guide_description"))
+        guide_widgets["language_label"].config(text=gt("language_label"))
+        guide_widgets["save_button"].config(text=gt("save"))
+        guide_widgets["close_button"].config(text=gt("close"))
+
+        option_menu = guide_widgets["option_menu"]
+        menu = option_menu["menu"]
+        menu.delete(0, "end")
+        menu.add_command(label=gt("language_option_tr"), command=tk._setit(lang_var, "tr"))
+        menu.add_command(label=gt("language_option_en"), command=tk._setit(lang_var, "en"))
+        option_menu.config(text=gt(f"language_option_{lang_var.get()}"))
+
+    def on_language_change(*_: object) -> None:
+        update_main_texts()
+        update_guide_texts()
+
+    lang_var.trace_add("write", on_language_change)
+
     def open_language_guide() -> None:
         guide = tk.Toplevel(root)
         guide.title(gt("guide_title"))
         guide.resizable(False, False)
 
-        tk.Label(
+        guide_description_label = tk.Label(
             guide,
             text=(
                 gt("guide_description")
             ),
             justify="left",
             wraplength=420,
-        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 8))
+        )
+        guide_description_label.grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 8))
 
-        tk.Label(guide, text=gt("language_label")).grid(row=1, column=0, sticky="w", padx=10, pady=6)
-        tk.OptionMenu(guide, lang_var, "tr", "en").grid(row=1, column=1, sticky="w", padx=10, pady=6)
+        guide_language_label = tk.Label(guide, text=gt("language_label"))
+        guide_language_label.grid(row=1, column=0, sticky="w", padx=10, pady=6)
+        guide_option = tk.OptionMenu(guide, lang_var, "tr", "en")
+        guide_option.grid(row=1, column=1, sticky="w", padx=10, pady=6)
 
         def save_language() -> None:
             chosen = lang_var.get() if lang_var.get() in {"tr", "en"} else "tr"
             lang_var.set(chosen)
             default_config.language = chosen
             status_var.set(gt("status_language_saved", lang=chosen))
-            root.title(gt("window_title"))
             guide.destroy()
+            guide_widgets.clear()
 
-        tk.Button(guide, text=gt("save"), command=save_language, width=14).grid(row=2, column=0, padx=10, pady=(6, 10), sticky="w")
-        tk.Button(guide, text=gt("close"), command=guide.destroy, width=14).grid(row=2, column=1, padx=10, pady=(6, 10), sticky="e")
+        save_guide_button = tk.Button(guide, text=gt("save"), command=save_language, width=14)
+        save_guide_button.grid(row=2, column=0, padx=10, pady=(6, 10), sticky="w")
+        close_guide_button = tk.Button(guide, text=gt("close"), command=guide.destroy, width=14)
+        close_guide_button.grid(row=2, column=1, padx=10, pady=(6, 10), sticky="e")
+
+        guide_widgets.update(
+            {
+                "window": guide,
+                "description": guide_description_label,
+                "language_label": guide_language_label,
+                "option_menu": guide_option,
+                "save_button": save_guide_button,
+                "close_button": close_guide_button,
+            }
+        )
+        update_guide_texts()
 
     def on_start() -> None:
         nonlocal runner_thread
@@ -1711,29 +1828,37 @@ def launch_config_gui(default_config: Config) -> None:
         root.destroy()
 
     row = 0
-    tk.Label(root, text=gt("savegames_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    labels["savegames"] = tk.Label(root, text=gt("savegames_label"))
+    labels["savegames"].grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=savegames_var).grid(row=row, column=1, padx=8, pady=6)
-    tk.Button(root, text=gt("select"), command=browse_savegames).grid(row=row, column=2, padx=8, pady=6)
+    buttons["select_savegames"] = tk.Button(root, text=gt("select"), command=browse_savegames)
+    buttons["select_savegames"].grid(row=row, column=2, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text=gt("oauth_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    labels["oauth"] = tk.Label(root, text=gt("oauth_label"))
+    labels["oauth"].grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=credentials_var).grid(row=row, column=1, padx=8, pady=6)
-    tk.Button(root, text=gt("select"), command=browse_credentials_file).grid(row=row, column=2, padx=8, pady=6)
+    buttons["select_oauth"] = tk.Button(root, text=gt("select"), command=browse_credentials_file)
+    buttons["select_oauth"].grid(row=row, column=2, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text=gt("folder_id_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    labels["folder_id"] = tk.Label(root, text=gt("folder_id_label"))
+    labels["folder_id"].grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=folder_id_var).grid(row=row, column=1, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text=gt("process_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    labels["process"] = tk.Label(root, text=gt("process_label"))
+    labels["process"].grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=process_var).grid(row=row, column=1, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text=gt("poll_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    labels["poll"] = tk.Label(root, text=gt("poll_label"))
+    labels["poll"].grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=20, textvariable=poll_var).grid(row=row, column=1, sticky="w", padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text=gt("settle_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    labels["settle"] = tk.Label(root, text=gt("settle_label"))
+    labels["settle"].grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=20, textvariable=settle_var).grid(row=row, column=1, sticky="w", padx=8, pady=6)
 
     row += 1
@@ -1743,17 +1868,21 @@ def launch_config_gui(default_config: Config) -> None:
 
 
     row += 1
-    tk.Label(root, text=gt("live_log")).grid(row=row, column=0, sticky="nw", padx=8, pady=6)
+    labels["live_log"] = tk.Label(root, text=gt("live_log"))
+    labels["live_log"].grid(row=row, column=0, sticky="nw", padx=8, pady=6)
     log_text = tk.Text(root, width=82, height=10, state="disabled")
     log_text.grid(row=row, column=1, columnspan=2, padx=8, pady=6, sticky="w")
 
     row += 1
-    tk.Button(root, text=gt("language_guide"), command=open_language_guide, width=26).grid(
+    buttons["language_guide"] = tk.Button(root, text=gt("language_guide"), command=open_language_guide, width=26)
+    buttons["language_guide"].grid(
         row=row, column=0, sticky="w", padx=8, pady=12
     )
     start_button = tk.Button(root, text=gt("start"), command=on_start, width=18)
+    buttons["start"] = start_button
     start_button.grid(row=row, column=1, sticky="w", padx=8, pady=12)
-    tk.Button(root, text=gt("close"), command=on_cancel, width=12).grid(
+    buttons["close"] = tk.Button(root, text=gt("close"), command=on_cancel, width=12)
+    buttons["close"].grid(
         row=row, column=1, sticky="e", padx=8, pady=12
     )
 
@@ -1772,12 +1901,12 @@ def main() -> None:
         config = default_config
         errors = preflight(config)
         if errors:
-            print("[PRECHECK] Hazır değil / Not ready. Tespit edilen sorunlar / Detected issues:")
+            print(choose_text(config.language, "[PRECHECK] Hazır değil. Tespit edilen sorunlar:", "[PRECHECK] Not ready. Detected issues:"))
             for issue in errors:
                 print(f"  - {issue}")
             raise SystemExit(1)
 
-        print("[PRECHECK] Hazır / Ready: temel kontroller geçti / base checks passed.")
+        print(choose_text(config.language, "[PRECHECK] Hazır: temel kontroller geçti.", "[PRECHECK] Ready: base checks passed."))
         if args.doctor:
             return
 
