@@ -1508,7 +1508,6 @@ def parse_args() -> argparse.Namespace:
 def launch_config_gui(default_config: Config) -> None:
     """Kullanıcıdan ayarları alır ve izlemeyi GUI açık kalırken arka planda başlatır."""
     root = tk.Tk()
-    root.title("Big Ambitions Drive Sync - Ayarlar / Settings")
     root.resizable(False, False)
 
     savegames_var = tk.StringVar(value=str(default_config.savegames_root))
@@ -1517,8 +1516,81 @@ def launch_config_gui(default_config: Config) -> None:
     process_var = tk.StringVar(value=",".join(default_config.process_names))
     poll_var = tk.StringVar(value=str(default_config.poll_seconds))
     settle_var = tk.StringVar(value=str(default_config.file_settle_seconds))
-    status_var = tk.StringVar(value="Durum / Status: Hazır / Ready")
+    status_var = tk.StringVar(value="")
     lang_var = tk.StringVar(value=default_config.language if default_config.language in {"tr", "en"} else "tr")
+
+    GUI_TEXTS = {
+        "tr": {
+            "window_title": "Big Ambitions Drive Sync - Ayarlar",
+            "status_ready": "Durum: Hazır",
+            "status_info": "Durum: {message}",
+            "status_error": "Durum: Hata - {message}",
+            "status_warn": "Durum: Uyarı - {message}",
+            "savegames_label": "SaveGames klasörü",
+            "oauth_label": "OAuth Credentials JSON",
+            "folder_id_label": "Drive Folder ID",
+            "process_label": "Process adları (virgülle)",
+            "poll_label": "Döngü bekleme sn",
+            "settle_label": "Dosya yazım bekleme sn",
+            "live_log": "Canlı log",
+            "select": "Seç",
+            "start": "Başlat",
+            "close": "Kapat",
+            "language_guide": "Dil Rehberi",
+            "guide_title": "Dil Rehberi",
+            "guide_description": "Uygulama dili ve üretilen Google Sheet/Excel başlıkları bu seçimle güncellenir.",
+            "language_label": "Dil",
+            "save": "Kaydet",
+            "status_language_saved": "Durum: Dil güncellendi ({lang}). İzleme başladığında uygulanacak.",
+            "settings_error": "Ayar Hatası",
+            "info": "Bilgi",
+            "already_running": "İzleme zaten çalışıyor.",
+            "started_title": "Başlatıldı",
+            "started_message": "İzleme arka planda başladı. Bu pencereyi durum takibi için açık tutabilirsiniz.",
+            "duration_error": "Süre değerleri 0'dan büyük olmalı",
+            "select_savegames": "SaveGames klasörünü seç",
+            "select_oauth": "OAuth credentials JSON seç",
+        },
+        "en": {
+            "window_title": "Big Ambitions Drive Sync - Settings",
+            "status_ready": "Status: Ready",
+            "status_info": "Status: {message}",
+            "status_error": "Status: Error - {message}",
+            "status_warn": "Status: Warning - {message}",
+            "savegames_label": "SaveGames folder",
+            "oauth_label": "OAuth Credentials JSON",
+            "folder_id_label": "Drive Folder ID",
+            "process_label": "Process names (comma-separated)",
+            "poll_label": "Poll seconds",
+            "settle_label": "File settle seconds",
+            "live_log": "Live log",
+            "select": "Select",
+            "start": "Start",
+            "close": "Close",
+            "language_guide": "Language Guide",
+            "guide_title": "Language Guide",
+            "guide_description": "App language and generated Google Sheet/Excel titles follow this selection.",
+            "language_label": "Language",
+            "save": "Save",
+            "status_language_saved": "Status: Language updated ({lang}). Applied when monitoring starts.",
+            "settings_error": "Settings Error",
+            "info": "Info",
+            "already_running": "Monitoring is already running.",
+            "started_title": "Started",
+            "started_message": "Monitoring started in background. You can keep this window open for status updates.",
+            "duration_error": "Durations must be greater than 0",
+            "select_savegames": "Select SaveGames folder",
+            "select_oauth": "Select OAuth credentials JSON",
+        },
+    }
+
+    def gt(key: str, **kwargs: object) -> str:
+        lang = lang_var.get() if lang_var.get() in {"tr", "en"} else "tr"
+        template = GUI_TEXTS[lang][key]
+        return template.format(**kwargs)
+
+    root.title(gt("window_title"))
+    status_var.set(gt("status_ready"))
 
     runner_thread: Optional[threading.Thread] = None
 
@@ -1538,11 +1610,11 @@ def launch_config_gui(default_config: Config) -> None:
 
             updated = True
             if message.startswith("[ERROR]"):
-                status_var.set(f"Durum / Status: Hata / Error - {message}")
+                status_var.set(gt("status_error", message=message))
             elif message.startswith("[WARN]"):
-                status_var.set(f"Durum / Status: Uyarı / Warning - {message}")
+                status_var.set(gt("status_warn", message=message))
             else:
-                status_var.set(f"Durum / Status: {message}")
+                status_var.set(gt("status_info", message=message))
 
             log_text.configure(state="normal")
             log_text.insert("end", message + "\n")
@@ -1554,13 +1626,13 @@ def launch_config_gui(default_config: Config) -> None:
         root.after(250, pump_logs)
 
     def browse_savegames() -> None:
-        selected = filedialog.askdirectory(title="SaveGames klasörünü seç / Select SaveGames folder")
+        selected = filedialog.askdirectory(title=gt("select_savegames"))
         if selected:
             savegames_var.set(selected)
 
     def browse_credentials_file() -> None:
         selected = filedialog.askopenfilename(
-            title="OAuth credentials JSON seç / Select OAuth credentials JSON",
+            title=gt("select_oauth"),
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
         )
         if selected:
@@ -1568,33 +1640,31 @@ def launch_config_gui(default_config: Config) -> None:
 
     def open_language_guide() -> None:
         guide = tk.Toplevel(root)
-        guide.title("Dil Rehberi / Language Guide")
+        guide.title(gt("guide_title"))
         guide.resizable(False, False)
 
         tk.Label(
             guide,
             text=(
-                "Uygulama dili ve üretilen Google Sheet/Excel başlıkları bu seçimle güncellenir.\n"
-                "App language and generated Google Sheet/Excel titles follow this selection."
+                gt("guide_description")
             ),
             justify="left",
             wraplength=420,
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 8))
 
-        tk.Label(guide, text="Dil / Language").grid(row=1, column=0, sticky="w", padx=10, pady=6)
+        tk.Label(guide, text=gt("language_label")).grid(row=1, column=0, sticky="w", padx=10, pady=6)
         tk.OptionMenu(guide, lang_var, "tr", "en").grid(row=1, column=1, sticky="w", padx=10, pady=6)
 
         def save_language() -> None:
             chosen = lang_var.get() if lang_var.get() in {"tr", "en"} else "tr"
             lang_var.set(chosen)
             default_config.language = chosen
-            status_var.set(
-                "Durum / Status: Dil güncellendi ({}). İzleme başladığında uygulanacak. / Language updated ({}). Applied when monitoring starts.".format(chosen, chosen)
-            )
+            status_var.set(gt("status_language_saved", lang=chosen))
+            root.title(gt("window_title"))
             guide.destroy()
 
-        tk.Button(guide, text="Kaydet / Save", command=save_language, width=14).grid(row=2, column=0, padx=10, pady=(6, 10), sticky="w")
-        tk.Button(guide, text="Kapat / Close", command=guide.destroy, width=14).grid(row=2, column=1, padx=10, pady=(6, 10), sticky="e")
+        tk.Button(guide, text=gt("save"), command=save_language, width=14).grid(row=2, column=0, padx=10, pady=(6, 10), sticky="w")
+        tk.Button(guide, text=gt("close"), command=guide.destroy, width=14).grid(row=2, column=1, padx=10, pady=(6, 10), sticky="e")
 
     def on_start() -> None:
         nonlocal runner_thread
@@ -1602,7 +1672,7 @@ def launch_config_gui(default_config: Config) -> None:
             poll_seconds = int(poll_var.get().strip())
             settle_seconds = int(settle_var.get().strip())
             if poll_seconds <= 0 or settle_seconds <= 0:
-                raise ValueError("Süre değerleri 0'dan büyük olmalı / Durations must be greater than 0")
+                raise ValueError(gt("duration_error"))
 
             process_names = tuple(
                 p.strip() for p in process_var.get().split(",") if p.strip()
@@ -1619,51 +1689,51 @@ def launch_config_gui(default_config: Config) -> None:
 
             errors = preflight(cfg)
             if errors:
-                messagebox.showerror("Ayar Hatası / Settings Error", "\n".join(errors))
+                messagebox.showerror(gt("settings_error"), "\n".join(errors))
                 return
 
             if runner_thread and runner_thread.is_alive():
-                messagebox.showinfo("Bilgi / Info", "İzleme zaten çalışıyor. / Monitoring is already running.")
+                messagebox.showinfo(gt("info"), gt("already_running"))
                 return
 
             runner_thread = threading.Thread(target=run_loop, args=(cfg, gui_logger), daemon=True)
             runner_thread.start()
-            status_var.set("Durum / Status: İzleme başladı / Monitoring started (pencere açık kalır)")
+            status_var.set(gt("status_info", message=gt("started_title")))
             start_button.config(state="disabled")
             messagebox.showinfo(
-                "Başlatıldı / Started",
-                "İzleme arka planda başladı. Bu pencere kapanmadı; durum takibi için açık kalabilir. / Monitoring started in background. You can keep this window open for status updates.",
+                gt("started_title"),
+                gt("started_message"),
             )
         except ValueError as exc:
-            messagebox.showerror("Ayar Hatası / Settings Error", str(exc))
+            messagebox.showerror(gt("settings_error"), str(exc))
 
     def on_cancel() -> None:
         root.destroy()
 
     row = 0
-    tk.Label(root, text="SaveGames klasörü / SaveGames folder").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Label(root, text=gt("savegames_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=savegames_var).grid(row=row, column=1, padx=8, pady=6)
-    tk.Button(root, text="Seç / Select", command=browse_savegames).grid(row=row, column=2, padx=8, pady=6)
+    tk.Button(root, text=gt("select"), command=browse_savegames).grid(row=row, column=2, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text="OAuth Credentials JSON").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Label(root, text=gt("oauth_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=credentials_var).grid(row=row, column=1, padx=8, pady=6)
-    tk.Button(root, text="Seç / Select", command=browse_credentials_file).grid(row=row, column=2, padx=8, pady=6)
+    tk.Button(root, text=gt("select"), command=browse_credentials_file).grid(row=row, column=2, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text="Drive Folder ID").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Label(root, text=gt("folder_id_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=folder_id_var).grid(row=row, column=1, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text="Process adları (virgülle) / Process names (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Label(root, text=gt("process_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=60, textvariable=process_var).grid(row=row, column=1, padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text="Döngü bekleme sn / Poll seconds").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Label(root, text=gt("poll_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=20, textvariable=poll_var).grid(row=row, column=1, sticky="w", padx=8, pady=6)
 
     row += 1
-    tk.Label(root, text="Dosya yazım bekleme sn / File settle seconds").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+    tk.Label(root, text=gt("settle_label")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
     tk.Entry(root, width=20, textvariable=settle_var).grid(row=row, column=1, sticky="w", padx=8, pady=6)
 
     row += 1
@@ -1673,17 +1743,17 @@ def launch_config_gui(default_config: Config) -> None:
 
 
     row += 1
-    tk.Label(root, text="Canlı log / Live log").grid(row=row, column=0, sticky="nw", padx=8, pady=6)
+    tk.Label(root, text=gt("live_log")).grid(row=row, column=0, sticky="nw", padx=8, pady=6)
     log_text = tk.Text(root, width=82, height=10, state="disabled")
     log_text.grid(row=row, column=1, columnspan=2, padx=8, pady=6, sticky="w")
 
     row += 1
-    tk.Button(root, text="Dil Rehberi / Language Guide", command=open_language_guide, width=26).grid(
+    tk.Button(root, text=gt("language_guide"), command=open_language_guide, width=26).grid(
         row=row, column=0, sticky="w", padx=8, pady=12
     )
-    start_button = tk.Button(root, text="Başlat / Start", command=on_start, width=18)
+    start_button = tk.Button(root, text=gt("start"), command=on_start, width=18)
     start_button.grid(row=row, column=1, sticky="w", padx=8, pady=12)
-    tk.Button(root, text="Kapat / Close", command=on_cancel, width=12).grid(
+    tk.Button(root, text=gt("close"), command=on_cancel, width=12).grid(
         row=row, column=1, sticky="e", padx=8, pady=12
     )
 
