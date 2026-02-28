@@ -386,7 +386,10 @@ class DriveUploader:
                             }
                         ],
                         "series": basic_series,
-                        "headerCount": 1,
+                        # Başlık satırı aralığa dahil edilmeden referans veriyoruz
+                        # (startRowIndex=1). Bu nedenle headerCount=1 verilirse
+                        # ilk veri satırı başlık sayılıp seri boş kalabilir.
+                        "headerCount": 0,
                     },
                 }
             else:
