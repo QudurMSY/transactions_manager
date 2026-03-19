@@ -751,10 +751,12 @@ def sheet_labels(lang: str) -> dict[str, object]:
             "no_expense": "NoExpense",
             "daily_income_expense": "{period} Income-Expense",
             "daily_net_income": "{period} Net Income",
+            "daily_total_income": "{period} Total Income",
             "income_by_type": "{period} Income by Type",
             "expense_by_type": "{period} Expense by Type",
             "period_income_expense": "Income-Expense by Period",
             "period_net_income": "Net Income by Period",
+            "period_total_income": "Total Income by Period",
             "income_by_type_total": "Income by Type",
             "expense_by_type_total": "Expense by Type",
         }
@@ -775,10 +777,12 @@ def sheet_labels(lang: str) -> dict[str, object]:
         "no_expense": "HarcamaYok",
         "daily_income_expense": "{period} Kazanc-Harcama",
         "daily_net_income": "{period} Net Kazanc",
+        "daily_total_income": "{period} Toplam Kazanc",
         "income_by_type": "{period} Turlere Gore Kazanc",
         "expense_by_type": "{period} Turlere Gore Harcama",
         "period_income_expense": "Periyot Bazli Kazanc-Harcama",
         "period_net_income": "Periyot Bazli Net Kazanc",
+        "period_total_income": "Periyot Bazli Toplam Kazanc",
         "income_by_type_total": "Turlere Gore Kazanc",
         "expense_by_type_total": "Turlere Gore Harcama",
     }
@@ -823,6 +827,7 @@ def build_daily_sheet_payload(
     charts = [
         {"type": "bar", "title": str(labels["daily_income_expense"]).format(period=period), "sheet": summary_sheet, "cats_col": 1, "series": [(2, income_label), (3, expense_label)]},
         {"type": "line", "title": str(labels["daily_net_income"]).format(period=period), "sheet": summary_sheet, "cats_col": 1, "series": [(4, net_income_label)]},
+        {"type": "line", "title": str(labels["daily_total_income"]).format(period=period), "sheet": summary_sheet, "cats_col": 1, "series": [(2, income_label)]},
         {"type": "pie", "title": str(labels["income_by_type"]).format(period=period), "sheet": types_sheet, "cats_col": 1, "series": [(2, income_label)]},
         {"type": "pie", "title": str(labels["expense_by_type"]).format(period=period), "sheet": types_sheet, "cats_col": 3, "series": [(4, expense_label)]},
     ]
@@ -867,6 +872,7 @@ def build_period_totals_sheet_payload(
     charts = [
         {"type": "bar", "title": str(labels["period_income_expense"]), "sheet": summary_sheet, "cats_col": 1, "series": [(2, income_label), (3, expense_label)]},
         {"type": "line", "title": str(labels["period_net_income"]), "sheet": summary_sheet, "cats_col": 1, "series": [(4, net_income_label)]},
+        {"type": "line", "title": str(labels["period_total_income"]), "sheet": summary_sheet, "cats_col": 1, "series": [(2, income_label)]},
         {"type": "pie", "title": str(labels["income_by_type_total"]), "sheet": types_sheet, "cats_col": 1, "series": [(2, income_label)]},
         {"type": "pie", "title": str(labels["expense_by_type_total"]), "sheet": types_sheet, "cats_col": 3, "series": [(4, expense_label)]},
     ]
@@ -894,6 +900,12 @@ def build_daily_summary_csv(period: str, transactions: list[tuple[int, str, floa
     lines.append("Gun,NetKazanc")
     for day, _income, _expense, net in metrics_rows:
         lines.append(f"{day},{net:.2f}")
+
+    lines.append("")
+    lines.append("[Grafik] Cizgi - Gunluk Toplam Kazanc")
+    lines.append("Gun,Kazanc")
+    for day, income, _expense, _net in metrics_rows:
+        lines.append(f"{day},{income:.2f}")
 
     lines.append("")
     lines.append("[Grafik] Pasta - Kazanc Turleri")
@@ -931,6 +943,12 @@ def build_period_totals_csv(transactions: list[tuple[int, str, float]]) -> bytes
     lines.append("Periyot,NetKazanc")
     for period, _income, _expense, net in metrics_rows:
         lines.append(f"{period},{net:.2f}")
+
+    lines.append("")
+    lines.append("[Grafik] Cizgi - Periyot Bazli Toplam Kazanc")
+    lines.append("Periyot,Kazanc")
+    for period, income, _expense, _net in metrics_rows:
+        lines.append(f"{period},{income:.2f}")
 
     lines.append("")
     lines.append("[Grafik] Pasta - Toplam Kazanc Turleri")
