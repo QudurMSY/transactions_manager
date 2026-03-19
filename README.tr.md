@@ -7,6 +7,7 @@ Big Ambitions oyunundaki `transactions.csv` dosyasını izler, değişim oldukç
 - `transactions.csv` değişince kısa süre bekler (dosya yazımı tamamlansın diye).
 - CSV içinden gün (`day`) değerini okur.
 - Dosyayı `transactionsgun_<gun>.csv` adıyla Drive'a yükler/günceller.
+- Aynı günün dosyası Drive'da varsa yalnızca yeni/farklı satırları algılar ve dosyanın sonuna ekler.
 
 ---
 

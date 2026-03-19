@@ -7,6 +7,7 @@ Monitors the `transactions.csv` file in Big Ambitions and uploads it to Google D
 - Waits briefly when `transactions.csv` changes (so file writing can finish).
 - Reads the day (`day`) value from the CSV.
 - Uploads/updates the file to Drive as `transactionsgun_<day>.csv`.
+- If that day's file already exists on Drive, it detects only new/different rows and appends them to the end of the existing file.
 
 ---
 

@@ -304,6 +304,9 @@ class DriveUploader:
         files = response.get("files", [])
         return files[0]["id"] if files else None
 
+    def find_file_id_in_parent(self, file_name: str, parent_id: Optional[str]) -> Optional[str]:
+        return self._find_existing_file_id_in_parent(file_name, parent_id)
+
     def ensure_folder(self, folder_name: str, parent_id: Optional[str]) -> str:
         existing_id = self._find_existing_file_id_in_parent(folder_name, parent_id)
         if existing_id:
@@ -595,6 +598,64 @@ def day_from_drive_csv_name(file_name: str) -> Optional[int]:
     if not match:
         return None
     return int(match.group(1))
+
+
+def _csv_rows_from_bytes(csv_bytes: bytes) -> list[list[str]]:
+    text = csv_bytes.decode("utf-8-sig", errors="replace")
+    return [row for row in csv.reader(StringIO(text))]
+
+
+def _csv_bytes_from_rows(rows: list[list[str]]) -> bytes:
+    output = StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerows(rows)
+    return output.getvalue().encode("utf-8")
+
+
+def merge_daily_csv_bytes(existing_csv_bytes: bytes, new_csv_bytes: bytes) -> tuple[bytes, int]:
+    """Aynı güne ait CSV dosyalarını birleştirir ve yalnızca yeni satırları ekler."""
+    existing_rows = _csv_rows_from_bytes(existing_csv_bytes)
+    new_rows = _csv_rows_from_bytes(new_csv_bytes)
+
+    if not existing_rows:
+        return new_csv_bytes, len(new_rows)
+    if not new_rows:
+        return existing_csv_bytes, 0
+
+    def has_header(rows: list[list[str]]) -> bool:
+        if not rows:
+            return False
+        first = rows[0]
+        return len(first) < 2 or not first[1].strip().isdigit()
+
+    existing_has_header = has_header(existing_rows)
+    new_has_header = has_header(new_rows)
+
+    existing_header = existing_rows[0] if existing_has_header else None
+    new_header = new_rows[0] if new_has_header else None
+
+    existing_data = existing_rows[1:] if existing_has_header else existing_rows
+    new_data = new_rows[1:] if new_has_header else new_rows
+
+    def row_key(row: list[str]) -> tuple[str, ...]:
+        return tuple(cell.strip() for cell in row)
+
+    existing_keys = {row_key(row) for row in existing_data}
+    appended_rows: list[list[str]] = []
+    for row in new_data:
+        key = row_key(row)
+        if key in existing_keys:
+            continue
+        appended_rows.append(row)
+        existing_keys.add(key)
+
+    merged_rows: list[list[str]] = []
+    header = existing_header or new_header
+    if header is not None:
+        merged_rows.append(header)
+    merged_rows.extend(existing_data)
+    merged_rows.extend(appended_rows)
+    return _csv_bytes_from_rows(merged_rows), len(appended_rows)
 
 
 def parse_amount(raw: str) -> float:
@@ -1234,6 +1295,18 @@ class TransactionsHandler(FileSystemEventHandler):
 
         root_folder_id = self.uploader.ensure_folder("big ambitions", self.uploader.folder_id)
         period_folder_id = self.uploader.ensure_folder(period, root_folder_id)
+
+        existing_daily_id = self.uploader.find_file_id_in_parent(drive_name, period_folder_id)
+        if existing_daily_id:
+            existing_daily_bytes = self.uploader.download_file_bytes(existing_daily_id)
+            csv_bytes, appended_count = merge_daily_csv_bytes(existing_daily_bytes, csv_bytes)
+            self.logger(
+                choose_text(
+                    self.lang,
+                    f"[INFO] {drive_name} bulundu; {appended_count} yeni satır sona eklendi.",
+                    f"[INFO] {drive_name} found; appended {appended_count} new rows to the end.",
+                )
+            )
 
         result = self.uploader.upload_or_update_in_parent(
             csv_bytes,
